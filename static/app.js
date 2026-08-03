@@ -34,6 +34,11 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// safe JS string literal inside a double-quoted HTML attribute
+function jsq(s) {
+  return JSON.stringify(String(s ?? "")).replace(/"/g, "&quot;");
+}
+
 function money(n) {
   return n == null ? "" : "¥" + Number(n).toLocaleString("zh-CN", { maximumFractionDigits: 2 });
 }
@@ -58,7 +63,8 @@ function openPdf(doctype, name) {
 
 // Share the PDF as a real file (WeChat etc.) via the Web Share API;
 // falls back to a plain download when file-sharing is unsupported.
-async function sharePdf(doctype, name, btn) {
+// File/title show the customer name, e.g. "壹杯葡萄酒商店 SAL-ORD-....pdf"
+async function sharePdf(doctype, name, btn, customer) {
   const label = btn ? btn.textContent : null;
   if (btn) { btn.disabled = true; btn.textContent = "生成 PDF 中…"; }
   try {
@@ -68,15 +74,16 @@ async function sharePdf(doctype, name, btn) {
       throw new Error(b.error || `HTTP ${r.status}`);
     }
     const blob = await r.blob();
-    const file = new File([blob], `${name}.pdf`, { type: "application/pdf" });
+    const label2 = `${(customer || "").trim()} ${name}`.trim();
+    const file = new File([blob], `${label2}.pdf`, { type: "application/pdf" });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: name });
+      await navigator.share({ files: [file], title: label2 });
     } else {
       // fallback: trigger a download so it lands in Files/Downloads
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${name}.pdf`;
+      a.download = `${label2}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
       toast("PDF 已下载，可在文件中分享");
@@ -247,7 +254,7 @@ async function renderOrderDetail(name) {
       <div class="card" id="so-charges"></div>
       ${draft ? `<button class="btn secondary" id="save-so-charges">💾 保存修改</button>` : ""}
       <button class="btn secondary" onclick="openPdf('Sales Order','${esc(o.name)}')">🖨 打印订单 PDF</button>
-      <button class="btn secondary" onclick="sharePdf('Sales Order','${esc(o.name)}', this)">📤 分享订单 PDF（微信）</button>
+      <button class="btn secondary" onclick='sharePdf("Sales Order", ${jsq(o.name)}, this, ${jsq(o.customer_name)})'>📤 分享订单 PDF（微信）</button>
       ${draft
         ? `<button class="btn danger" id="submit-so">✅ 提交订单并打印 PDF</button>` : ""}
       ${o.docstatus === 1 && !["Completed", "Closed", "Cancelled"].includes(o.status)
@@ -455,7 +462,7 @@ async function renderDeliveryDetail(name) {
         <button class="btn danger" id="submit-print">✅ 提交出货并打印 PDF（扣库存）</button>
       ` : `
         <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
-        <button class="btn secondary" onclick="sharePdf('Delivery Note','${esc(d.name)}', this)">📤 分享出货单 PDF（微信）</button>
+        <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF（微信）</button>
       `}
     `;
     window._dn = d;
