@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>nextERP</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<header id="topbar">
+  <button id="back-btn" class="hidden" aria-label="返回">‹</button>
+  <h1 id="title">nextERP</h1>
+  <span id="top-spacer"></span>
+</header>
+
+<main id="view"></main>
+
+<nav id="tabs">
+  <button data-tab="orders" class="tab active">📋<span>订单</span></button>
+  <button data-tab="deliveries" class="tab">🚚<span>出货单</span></button>
+</nav>
+
+<div id="toast" class="hidden"></div>
+<script src="static/app.js"></script>
+</body>
+</html>

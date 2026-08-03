@@ -1,0 +1,18 @@
+# secrets — never commit
+.env
+
+# python venv
+bin/
+lib/
+lib64
+include/
+pyvenv.cfg
+__pycache__/
+*.pyc
+
+# local runtime data (copies of ERP data, user alert prefs)
+cache/
+alerts_state.json
+
+# test artifacts
+login_result.png
