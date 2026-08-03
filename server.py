@@ -17,7 +17,8 @@ import socket
 import threading
 
 import requests
-from flask import Flask, jsonify, request, send_from_directory, Response
+from flask import (Flask, jsonify, redirect, request, send_from_directory,
+                   session, Response)
 
 # ---------------------------------------------------------------- ERP client
 
@@ -288,6 +289,73 @@ def render_pdf(doctype, name):
 # ---------------------------------------------------------------- Flask app
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+
+# ------------------------------------------------------------- public auth
+# The app is open on the LAN, but when reached through the public domain a
+# password is required (session cookie). Config: app_config.json (gitignored).
+
+PUBLIC_HOSTS = ("luciatrading.duckdns.org",)
+
+try:
+    with open("app_config.json") as f:
+        _auth_conf = json.load(f)
+except (OSError, ValueError):
+    _auth_conf = {}
+
+app.secret_key = _auth_conf.get("secret_key", "dev-only-insecure")
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nextERP 登录</title><style>
+body{font-family:-apple-system,"PingFang SC",sans-serif;background:#f4f5f7;
+display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+form{background:#fff;padding:32px 24px;border-radius:12px;border:1px solid #e5e7eb;
+width:300px;display:flex;flex-direction:column;gap:12px}
+h1{font-size:18px;margin:0 0 8px;text-align:center}
+input{padding:12px;font-size:16px;border:1px solid #e5e7eb;border-radius:10px}
+button{padding:14px;font-size:16px;font-weight:600;border:none;border-radius:12px;
+background:#2563eb;color:#fff}
+.err{color:#dc2626;font-size:14px;text-align:center}
+</style></head><body>
+<form method="post"><h1>🔒 nextERP</h1>
+<input type="password" name="password" placeholder="密码" autofocus required>
+<button type="submit">登录</button>{err}</form></body></html>"""
+
+
+def _is_public():
+    return request.host.lower().split(":")[0] in PUBLIC_HOSTS
+
+
+@app.before_request
+def public_auth_gate():
+    if not _is_public():
+        return None
+    if request.path == "/login" or session.get("ok"):
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "auth required"}), 401
+    return redirect("/login")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    err = ""
+    if request.method == "POST":
+        from werkzeug.security import check_password_hash
+        if check_password_hash(_auth_conf.get("password_hash", ""),
+                               request.form.get("password", "")):
+            session["ok"] = True
+            session.permanent = True
+            return redirect("/")
+        err = '<div class="err">密码错误</div>'
+    return LOGIN_PAGE.replace("{err}", err)
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/login")
 
 
 def erp_json(resp):

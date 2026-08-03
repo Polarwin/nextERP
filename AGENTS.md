@@ -22,8 +22,21 @@ it works under the `/luciatrading/` prefix and standalone.
   on 2026-08-03). Add new `location` blocks inside the existing `homeserver`
   server block instead. Read `/etc/nginx/sites-enabled/` and
   `/etc/nginx/sites-available/` first.
+- Public access: `https://luciatrading.duckdns.org` → Caddy on the Frankfurt
+  VPS (8.211.26.86) → `127.0.0.1:8347` → frp tcp tunnel (frps on Frankfurt,
+  frpc on 192.168.0.103, shared token in their existing configs) →
+  `192.168.0.9:8347`. Frankfurt runs other apps behind the same Caddy +
+  frps; 192.168.0.103 runs other frpc proxies. **Always APPEND to
+  `/etc/caddy/Caddyfile` and `/etc/frp/frpc.toml` — never overwrite**, keep
+  the existing frp token, and use `caddy reload` / `frpc reload` (hot) so
+  other apps are not interrupted.
 - Credentials live in `.env` (`website`, `username`, `password`) and must
   stay server-side — never print them, never send them to the browser.
+- Public auth: requests whose Host is `luciatrading.duckdns.org` require a
+  password login (Flask session cookie, 31-day); LAN access stays open.
+  Password hash + session secret in `app_config.json` (gitignored, never
+  commit). To change the password: regenerate the hash with
+  `werkzeug.security.generate_password_hash` and restart `server.py`.
 
 ## Architecture notes
 

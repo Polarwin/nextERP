@@ -13,6 +13,7 @@ __pycache__/
 # local runtime data (copies of ERP data, user alert prefs)
 cache/
 alerts_state.json
+app_config.json
 
 # test artifacts
 login_result.png
