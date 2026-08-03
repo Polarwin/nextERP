@@ -27,6 +27,7 @@ it works under the `/luciatrading/` prefix and standalone.
 
 ## Architecture notes
 
+- Setup: `bin/pip install -r requirements.txt && bin/python -m playwright install chromium`
 - `server.py` — Flask backend. Proxies Frappe REST API, renders PDFs with
   Playwright Chromium (the ERP's own server-side PDF is broken: wkhtmltopdf
   fails on a broken image link in the print formats).

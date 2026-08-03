@@ -146,12 +146,36 @@ def _cache_file(kind):
     return os.path.join(CACHE_DIR, f"{kind}.json")
 
 
+def _py_full(s):
+    """Lowercase no-tone pinyin of s, spaces stripped (ASCII passes through)."""
+    from pypinyin import pinyin, Style
+    return "".join(p[0] for p in pinyin(
+        str(s or ""), style=Style.NORMAL)).replace(" ", "").lower()
+
+
+def _py_initials(s):
+    from pypinyin import pinyin, Style
+    return "".join(p[0] for p in pinyin(
+        str(s or ""), style=Style.FIRST_LETTER)).replace(" ", "").lower()
+
+
+def _annotate(kind, rows):
+    """Attach pinyin search fields (_py full, _ini initials) to cached rows."""
+    field = {"customers": "customer_name", "items": "item_name"}.get(kind)
+    if not field:
+        return rows
+    for r in rows:
+        r["_py"] = _py_full(r.get(field))
+        r["_ini"] = _py_initials(r.get(field))
+    return rows
+
+
 def load_cache_from_disk():
     os.makedirs(CACHE_DIR, exist_ok=True)
     for kind in CACHE_SPECS:
         try:
             with open(_cache_file(kind)) as f:
-                _cache[kind] = json.load(f)
+                _cache[kind] = _annotate(kind, json.load(f))
         except (OSError, ValueError):
             pass
 
@@ -160,7 +184,7 @@ def refresh_cache():
     for kind, spec in CACHE_SPECS.items():
         r = erp.call("GET", spec["path"], params=spec["params"])
         r.raise_for_status()
-        rows = r.json().get("data", [])
+        rows = _annotate(kind, r.json().get("data", []))
         with _cache_lock:
             _cache[kind] = rows
         with open(_cache_file(kind), "w") as f:
@@ -180,12 +204,24 @@ def _cache_refresher():
 
 
 def cache_search(kind, q, fields, limit=20):
+    """Substring match on the given fields, plus pinyin matching:
+    the query works as hanzi substring, full pinyin (yibei), pinyin of
+    hanzi homophones (一杯), or pinyin initials (yb)."""
     q = (q or "").strip().lower()
+    q_compact = q.replace(" ", "")
+    q_py = _py_full(q) if q else ""
     with _cache_lock:
         rows = list(_cache[kind])
     if q:
-        rows = [r for r in rows
-                if any(q in str(r.get(f) or "").lower() for f in fields)]
+
+        def hit(r):
+            if any(q in str(r.get(f) or "").lower() for f in fields):
+                return True
+            py = r.get("_py", "")
+            ini = r.get("_ini", "")
+            return bool((q_py and q_py in py) or (q_compact and q_compact in ini))
+
+        rows = [r for r in rows if hit(r)]
     return rows[:limit]
 
 
@@ -285,15 +321,38 @@ def orders():
     if status:
         filters.append(["status", "=", status])
     r = erp.call("GET", "/api/resource/Sales Order", params={
-        "fields": json.dumps(["name", "customer_name", "transaction_date",
-                              "status", "docstatus", "grand_total",
-                              "per_delivered"]),
+        "fields": json.dumps(["name", "customer", "customer_name",
+                              "transaction_date", "status", "docstatus",
+                              "grand_total", "per_delivered"]),
         "filters": json.dumps(filters),
         "order_by": "transaction_date desc",
         "limit_page_length": 500,
     })
     body, code = erp_json(r)
-    return jsonify(body.get("data", body) if code == 200 else body), code
+    if code != 200:
+        return jsonify(body), code
+    rows = body.get("data", [])
+    q = request.args.get("q", "").strip().lower()
+    if q:
+        # match order no / customer substring, plus customer pinyin
+        # (yibei, 一杯, or initials yb) via the customer cache index
+        q_compact = q.replace(" ", "")
+        q_py = _py_full(q)
+        with _cache_lock:
+            cust_idx = {c["name"]: c for c in _cache["customers"]}
+
+        def hit(o):
+            if q in (o.get("customer_name") or "").lower() \
+                    or q in (o.get("name") or "").lower():
+                return True
+            c = cust_idx.get(o.get("customer"))
+            if not c:
+                return False
+            return bool((q_py and q_py in c.get("_py", ""))
+                        or (q_compact and q_compact in c.get("_ini", "")))
+
+        rows = [o for o in rows if hit(o)]
+    return jsonify(rows)
 
 
 # charge accounts the user actually puts on orders (from their order history)

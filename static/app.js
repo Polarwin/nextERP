@@ -123,7 +123,7 @@ async function renderOrders() {
   try {
     const rows = await api("/api/orders");
     const newBtn = `<button class="btn" onclick="push(renderNewOrder)">＋ 新建订单</button>`;
-    const searchBox = `<input class="search-input" id="order-q" placeholder="按客户名称搜索订单…" autocomplete="off">
+    const searchBox = `<input class="search-input" id="order-q" placeholder="搜索订单：客户名 / 拼音 / 单号…" autocomplete="off">
       <button class="btn warn hidden" id="stock-alert-btn" onclick="push(renderAlerts)"></button>
       <div id="order-list"></div>`;
     view.innerHTML = newBtn + searchBox;
@@ -143,11 +143,16 @@ async function renderOrders() {
       </div>`).join("") : '<div class="empty">没有匹配的订单</div>';
     };
     renderList(rows);
+    // server-side search so pinyin works (一杯 / yibei / yb all match 壹杯)
+    let searchT;
     document.getElementById("order-q").oninput = e => {
-      const q = e.target.value.trim().toLowerCase();
-      renderList(q ? rows.filter(o =>
-        (o.customer_name || "").toLowerCase().includes(q) ||
-        (o.name || "").toLowerCase().includes(q)) : rows);
+      clearTimeout(searchT);
+      const q = e.target.value.trim();
+      searchT = setTimeout(async () => {
+        try {
+          renderList(await api(`/api/orders?q=${encodeURIComponent(q)}`));
+        } catch (err) { /* keep current list on error */ }
+      }, 300);
     };
     // low-stock banner (non-blocking)
     api("/api/stock_alerts").then(data => {
