@@ -114,6 +114,27 @@ function pop() {
 
 backBtn.onclick = pop;
 
+/* ---------------- theme (dark mode) ---------------- */
+
+const themeBtn = document.getElementById("theme-btn");
+
+function applyTheme(mode) {
+  // mode: "dark" | "light" | null (follow system, e.g. night mode)
+  document.documentElement.classList.toggle("dark", mode === "dark");
+  document.documentElement.classList.toggle("light", mode === "light");
+  themeBtn.textContent = mode === "dark" ? "☀️" : mode === "light" ? "🌙" : "🌓";
+  if (mode) localStorage.setItem("theme", mode);
+  else localStorage.removeItem("theme");
+}
+
+themeBtn.onclick = () => {
+  const cur = localStorage.getItem("theme");
+  // cycle: auto -> dark -> light -> auto
+  applyTheme(cur === null ? "dark" : cur === "dark" ? "light" : null);
+};
+
+applyTheme(localStorage.getItem("theme"));
+
 /* ---------------- orders ---------------- */
 
 async function renderOrders() {

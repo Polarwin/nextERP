@@ -8,6 +8,33 @@
   --orange: #d97706;
   --grey: #9ca3af;
   --border: #e5e7eb;
+  --input-bg: #ffffff;
+  --hover: #eef2ff;
+}
+
+/* dark palette — applied automatically when the phone is in dark mode
+   (e.g. scheduled at night), or manually via :root.dark */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --bg: #0f1115;
+    --card: #1a1e26;
+    --text: #e5e7eb;
+    --muted: #9aa3b2;
+    --accent: #5b8def;
+    --border: #2c323d;
+    --input-bg: #12151c;
+    --hover: #232936;
+  }
+}
+:root.dark {
+  --bg: #0f1115;
+  --card: #1a1e26;
+  --text: #e5e7eb;
+  --muted: #9aa3b2;
+  --accent: #5b8def;
+  --border: #2c323d;
+  --input-bg: #12151c;
+  --hover: #232936;
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; padding: 0; }
@@ -30,6 +57,10 @@ body {
   border: none; background: none; font-size: 28px; line-height: 1;
   color: var(--accent); padding: 0 8px 4px 0;
 }
+#theme-btn {
+  border: none; background: none; font-size: 20px; line-height: 1;
+  padding: 4px; cursor: pointer;
+}
 
 #view {
   padding: 12px 12px calc(70px + env(safe-area-inset-bottom));
@@ -40,7 +71,7 @@ body {
   background: var(--card); border-radius: 12px; padding: 14px;
   margin-bottom: 10px; border: 1px solid var(--border);
 }
-.card.clickable:active { background: #eef2ff; }
+.card.clickable:active { background: var(--hover); }
 .card .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .card .customer { font-weight: 600; font-size: 16px; }
 .card .name { color: var(--muted); font-size: 13px; }
@@ -71,11 +102,12 @@ body {
 .stepper { display: flex; align-items: center; gap: 4px; }
 .stepper button {
   width: 40px; height: 40px; font-size: 22px; border-radius: 10px;
-  border: 1px solid var(--border); background: #fff; color: var(--accent);
+  border: 1px solid var(--border); background: var(--input-bg); color: var(--accent);
 }
 .stepper input {
   width: 56px; height: 40px; text-align: center; font-size: 16px;
   border: 1px solid var(--border); border-radius: 10px;
+  background: var(--input-bg); color: var(--text);
 }
 .qty-static { font-size: 16px; font-weight: 600; min-width: 40px; text-align: right; }
 
@@ -85,7 +117,7 @@ body {
   background: var(--accent); color: #fff;
 }
 .btn:active { opacity: 0.85; }
-.btn.secondary { background: #fff; color: var(--accent); border: 1px solid var(--accent); }
+.btn.secondary { background: var(--card); color: var(--accent); border: 1px solid var(--accent); }
 .btn.danger { background: var(--green); }
 .btn.warn { background: var(--orange); }
 .btn:disabled { background: var(--grey); }
@@ -118,12 +150,13 @@ body {
 .search-input {
   width: 100%; padding: 12px; font-size: 16px;
   border: 1px solid var(--border); border-radius: 10px;
+  background: var(--input-bg); color: var(--text);
 }
 .hit {
   padding: 12px 4px; border-bottom: 1px solid var(--border); font-size: 15px;
 }
 .hit:last-child { border-bottom: none; }
-.hit:active { background: #eef2ff; }
+.hit:active { background: var(--hover); }
 .hit b { margin-right: 6px; }
 .link-btn {
   border: none; background: none; color: var(--accent); font-size: 14px;
@@ -133,6 +166,7 @@ body {
 .rate-input {
   width: 80px; padding: 4px 6px; font-size: 14px;
   border: 1px solid var(--border); border-radius: 8px;
+  background: var(--input-bg); color: var(--text);
 }
 
 .detail-head { margin-bottom: 4px; }
