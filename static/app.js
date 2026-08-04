@@ -579,6 +579,12 @@ function renderNewOrder() {
            warehouse: null, shipping_rule: null, items: [], charges: [] };
   }
   view.innerHTML = `
+    <button class="btn secondary" id="voice-order" style="margin-top:0">🎤 语音下单（客户 + 商品 + 数量）</button>
+    <div id="voice-panel" class="card hidden">
+      <textarea id="voice-text" class="search-input" rows="3"
+        placeholder="点输入框，用键盘自带的 🎤 听写（或直接打字），例如：壹杯，雷司令三瓶，GG两瓶"></textarea>
+      <button class="btn" id="voice-parse">解析并填入表单</button>
+    </div>
     <div class="section-title">客户</div>
     <div class="card">
       <div id="cust-picked" class="${no.customer ? "" : "hidden"}">
@@ -617,6 +623,13 @@ function renderNewOrder() {
   document.getElementById("no-date").onchange = e => { no.delivery_date = e.target.value; };
   document.getElementById("no-save").onclick = () => saveNewOrder(false);
   document.getElementById("no-submit").onclick = () => saveNewOrder(true);
+  document.getElementById("voice-order").onclick = () => {
+    const p = document.getElementById("voice-panel");
+    p.classList.toggle("hidden");
+    if (!p.classList.contains("hidden"))
+      document.getElementById("voice-text").focus();
+  };
+  document.getElementById("voice-parse").onclick = (e) => parseVoice(e.target);
   loadWarehouses().then(() => {
     const sel = document.getElementById("no-warehouse");
     if (!sel) return;
@@ -758,6 +771,51 @@ async function saveNewOrder(submit) {
     toast("失败：" + e.message, 5000);
     btn.disabled = false;
   }
+}
+
+/* ---------------- voice order dictation (Kimi parsing) ---------------- */
+// Transcription happens at the OS keyboard level (iOS/Android dictation mic),
+// which works in any browser incl. WeChat — no Web Speech API needed.
+
+async function parseVoice(btn) {
+  const text = document.getElementById("voice-text").value.trim();
+  if (!text) { toast("先听写或输入订单内容"); return; }
+  btn.disabled = true;
+  btn.textContent = "解析中…";
+  try {
+    const d = await api("/api/parse_order", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    applyParsedOrder(d, text);
+  } catch (e) {
+    toast("解析失败：" + e.message, 5000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "解析并填入表单";
+  }
+}
+
+function applyParsedOrder(d, text) {
+  if (!no) return;
+  if (d.customer) {
+    no.customer = d.customer.name;
+    no.customer_name = d.customer.customer_name;
+  }
+  for (const it of d.items || []) {
+    const ex = no.items.find(x => x.item_code === it.item_code);
+    if (ex) ex.qty += it.qty;
+    else no.items.push({ item_code: it.item_code, item_name: it.item_name,
+                         uom: it.uom, qty: it.qty, rate: it.rate });
+  }
+  renderNewOrder();
+  const parts = [];
+  if (d.customer) parts.push("客户 " + d.customer.customer_name);
+  parts.push((d.items || []).length + " 个商品");
+  if (d.unmatched && d.unmatched.length)
+    parts.push("未识别：" + d.unmatched.join("、"));
+  if (d.notes && d.notes !== "null") parts.push("备注：" + d.notes);
+  toast(`「${text}」→ ` + parts.join("，") + "，请核对", 6000);
 }
 
 /* ---------------- new customer ---------------- */

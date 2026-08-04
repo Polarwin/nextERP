@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "customer": {
+      "type": ["string", "null"],
+      "description": "客户列表中最匹配的准确客户名称，没有把握为 null"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "item_code": {"type": "string", "description": "商品货号"},
+          "qty": {"type": "number", "description": "数量（瓶）"}
+        },
+        "required": ["item_code", "qty"],
+        "additionalProperties": false
+      }
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "不确定或需要用户确认的地方，没有为 null"
+    }
+  },
+  "required": ["customer", "items", "notes"],
+  "additionalProperties": false
+}

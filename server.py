@@ -657,6 +657,136 @@ def update_order(name):
     return jsonify(body.get("data", body) if code == 200 else body), code
 
 
+def _price_for(item_code, customer):
+    """Default selling rate (mirrors /api/item_price logic)."""
+    price_list = None
+    if customer:
+        with _cache_lock:
+            cust = next((c for c in _cache["customers"]
+                         if c.get("name") == customer), None)
+        price_list = (cust or {}).get("default_price_list")
+    if not price_list:
+        price_list = get_default_price_list()
+    r = erp.call("GET", "/api/resource/Item Price", params={
+        "fields": json.dumps(["price_list_rate"]),
+        "filters": json.dumps([["item_code", "=", item_code],
+                               ["price_list", "=", price_list],
+                               ["selling", "=", 1]]),
+        "limit_page_length": 1,
+    })
+    data = r.json().get("data", [])
+    return data[0]["price_list_rate"] if data else 0.0
+
+
+# ------------------------------------------------------- voice order parsing
+# Uses the local Codex CLI (logged-in ChatGPT account, no API key needed) —
+# same approach as the Recipes app.
+
+_PARSE_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "voice-parse-schema.json")
+
+
+def _codex_parse(prompt, user_text):
+    """Run codex exec with a strict JSON output schema; return parsed dict."""
+    import subprocess
+    import tempfile
+    full_prompt = prompt + "\n\n口述订单:" + user_text
+    with tempfile.TemporaryDirectory() as tmp:
+        out_file = os.path.join(tmp, "parsed.json")
+        r = subprocess.run(
+            ["codex", "exec", "--skip-git-repo-check", "--sandbox",
+             "read-only", "--output-schema", _PARSE_SCHEMA,
+             "-o", out_file, full_prompt],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=240, check=False)
+        try:
+            with open(out_file) as f:
+                return json.load(f)
+        except OSError:
+            raise RuntimeError(
+                f"Codex 解析失败 (exit {r.returncode}): "
+                f"{(r.stderr or r.stdout)[-300:]}")
+
+
+_PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口述一张订单，你要提取客户和商品明细。
+
+客户列表（名称|简称可能不完整，口述常有同音字）:
+{customers}
+
+商品列表（货号|名称）:
+{items}
+
+规则：
+- 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。
+- 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
+- 数量：中文或阿拉伯数字，单位瓶/箱等。一箱=12瓶。没说数量默认1瓶。
+- 只输出 JSON，不要任何其他文字：
+{{"customer": "客户列表中的准确名称或 null", "items": [{{"item_code": "货号", "qty": 数量}}], "notes": "不确定之处或 null"}}"""
+
+
+@app.route("/api/parse_order", methods=["POST"])
+def parse_order():
+    """Parse a dictated order via Kimi into customer + items (with prices)."""
+    text = (request.get_json(force=True).get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text required"}), 400
+
+    with _cache_lock:
+        customers = [c["customer_name"] for c in _cache["customers"]]
+        items = [(i["item_code"], i.get("item_name", ""))
+                 for i in _cache["items"]]
+
+    prompt = _PARSE_PROMPT.format(
+        customers="、".join(customers),
+        items="；".join(f"{code}|{name}" for code, name in items))
+    try:
+        parsed = _codex_parse(prompt, text)
+    except (RuntimeError, ValueError) as e:
+        return jsonify({"error": f"解析服务不可用:{e}"}), 502
+    except Exception as e:  # noqa: BLE001 - e.g. subprocess timeout
+        return jsonify({"error": f"解析超时或失败:{e}"}), 502
+
+    # map LLM output back to real records
+    customer = None
+    if parsed.get("customer"):
+        with _cache_lock:
+            customer = next(
+                (c for c in _cache["customers"]
+                 if c["customer_name"] == parsed["customer"]
+                 or c["name"] == parsed["customer"]), None)
+    out_items, unmatched = [], []
+    for it in parsed.get("items") or []:
+        code = str(it.get("item_code") or "")
+        with _cache_lock:
+            row = next((i for i in _cache["items"]
+                        if i["item_code"] == code), None)
+        if not row:
+            unmatched.append(code)
+            continue
+        qty = float(it.get("qty") or 1)
+        existing = next((x for x in out_items
+                         if x["item_code"] == row["item_code"]), None)
+        if existing:
+            existing["qty"] += qty
+            continue
+        out_items.append({
+            "item_code": row["item_code"],
+            "item_name": row.get("item_name", row["item_code"]),
+            "uom": row.get("stock_uom", ""),
+            "qty": qty,
+            "rate": _price_for(row["item_code"],
+                               customer["name"] if customer else None),
+        })
+
+    return jsonify({
+        "customer": customer and {"name": customer["name"],
+                                  "customer_name": customer["customer_name"]},
+        "items": out_items,
+        "unmatched": unmatched,
+        "notes": parsed.get("notes"),
+    })
+
+
 @app.route("/api/deliveries")
 def deliveries():
     r = erp.call("GET", "/api/resource/Delivery Note", params={
