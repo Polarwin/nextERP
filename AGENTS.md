@@ -25,7 +25,17 @@ it works under the `/luciatrading/` prefix and standalone.
 - Public access: `https://luciatrading.duckdns.org` → Caddy on the Frankfurt
   VPS (8.211.26.86) → `127.0.0.1:8347` → frp tcp tunnel (frps on Frankfurt,
   frpc on 192.168.0.103, shared token in their existing configs) →
-  `192.168.0.9:8347`. Frankfurt runs other apps behind the same Caddy +
+  `192.168.0.9:8347`. The company website is served at
+  `https://luciatrading.duckdns.org/www/` — Caddy rewrites `/www/*` to
+  `/lucia/*` and proxies to `127.0.0.1:8097`, a second frp tcp proxy
+  (`luciaweb`) → `192.168.0.9:80` (home nginx).
+- **Planned (user deferred)**: the user owns `luciatrading.com` (Aliyun DNS)
+  and wants to serve the company website on it directly from the Frankfurt
+  nginx (not Caddy) when winery visits start. When that happens: add an
+  A/AAAA record on Aliyun DNS → 8.211.26.86, serve the `www` branch `site/`
+  from Frankfurt's nginx (or proxy it to the existing `luciaweb` tunnel on
+  127.0.0.1:8097), set up TLS, and keep duckdns as fallback.
+  Frankfurt runs other apps behind the same Caddy +
   frps; 192.168.0.103 runs other frpc proxies. **Always APPEND to
   `/etc/caddy/Caddyfile` and `/etc/frp/frpc.toml` — never overwrite**, keep
   the existing frp token, and use `caddy reload` / `frpc reload` (hot) so
