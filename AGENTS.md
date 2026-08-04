@@ -40,6 +40,14 @@ it works under the `/luciatrading/` prefix and standalone.
 
 ## Architecture notes
 
+- Branches: `main` = the mobile app; `www` = the company website (`site/`,
+  EN/DE/FR/ES/IT). `site/` is gitignored on `main` — the live deployment is
+  an untracked copy in this worktree (symlinked from `/srv/www/lucia`). To
+  edit the website: `git checkout www`, edit `site/`, commit, push, then
+  `git checkout main` and `git archive www site | tar -x` to refresh the
+  live copy. Never `git checkout www` carelessly — switching branches
+  removes/restores `site/`.
+
 - Setup: `bin/pip install -r requirements.txt && bin/python -m playwright install chromium`
 - `server.py` — Flask backend. Proxies Frappe REST API, renders PDFs with
   Playwright Chromium (the ERP's own server-side PDF is broken: wkhtmltopdf
