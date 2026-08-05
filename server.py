@@ -851,30 +851,209 @@ def parse_order():
         return jsonify({"error": f"解析超时或失败:{e}"}), 502
 
 
+_SPLIT_RE = re.compile(r"[，,。;；、.!！?？\s]+|还有|再加|然后|另外")
+
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+              "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_QTY_TAIL = re.compile(
+    r"^(.*?)\s*([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
+    r"(瓶|箱|盒|个|支|件|听)?$")
+
+_STATIC_ALIASES = {"jiji": "GG", "jj": "GG", "吉吉": "GG"}
+
+_QTY_ONLY = re.compile(
+    r"^([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
+    r"(瓶|箱|盒|个|支|件|听)?$")
+
+
+def _seg_list(text):
+    """Split a transcript, keeping bare qty tokens ('五瓶', '2') glued to the
+    preceding segment ('阿尔巴利诺 五瓶' -> ['一杯','阿尔巴利诺五瓶'])."""
+    raw = [s.strip() for s in _SPLIT_RE.split(text) if s.strip()]
+    out = []
+    for s in raw:
+        m = _QTY_ONLY.match(s)
+        if out and m and _cn_int(m.group(1)) is not None:
+            out[-1] += s
+        else:
+            out.append(s)
+    return out
+
+
+def _cn_int(s):
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    if "十" in s:
+        left, _, right = s.partition("十")
+        if (left and left not in _CN_DIGITS) or \
+                (right and right not in _CN_DIGITS):
+            return None
+        return _CN_DIGITS.get(left, 1) * 10 + _CN_DIGITS.get(right, 0)
+    return _CN_DIGITS.get(s) if len(s) == 1 else None
+
+
+def _alias_for(seg):
+    """Static + learned aliases for a spoken segment (by text or pinyin)."""
+    for table in (_STATIC_ALIASES,
+                  {k: v["item_code"] for k, v
+                   in _load_learned().get("items", {}).items()}):
+        for key in (_norm(seg), _py_full(seg)):
+            if key in table:
+                return table[key]
+    return None
+
+
+def _relevance(seg_n, seg_py, row, name_field):
+    """Quick relevance of a transcript segment to a catalog row."""
+    name_n = _norm(row.get(name_field))
+    py = row.get("_py", "")
+    ini = row.get("_ini", "")
+    if not seg_n:
+        return 0.0
+    score = 0.0
+    if seg_n in name_n:
+        score = len(seg_n) * 2.0
+    elif len(seg_n) >= 2 and any(
+            name_n.startswith(seg_n[:i]) or seg_n[:i] in name_n
+            for i in range(len(seg_n), 1, -1)):
+        score = 2.0
+    if seg_py:
+        if seg_py in py:
+            score = max(score, len(seg_py) * 1.5)
+        elif len(seg_py) >= 2 and seg_py in ini:
+            score = max(score, len(seg_py))
+    return score
+
+
+def _prefilter_catalog(text, customers, items, n_cust=50, n_items=60):
+    """Trim the catalog to the rows most relevant to the transcript so the
+    LLM prompt stays small (big latency win). Scored per segment; generous
+    cutoffs keep the right row in almost all cases."""
+    segments = _seg_list(text)
+    scored = []
+    for seg in segments:
+        # strip the qty tail before alias lookup ("jiji两瓶" -> "jiji" -> GG)
+        name_part = seg
+        m = _QTY_TAIL.match(seg)
+        if m and m.group(1).strip() and _cn_int(m.group(2)) is not None:
+            name_part = m.group(1).strip()
+        variants = [name_part]
+        alias = _alias_for(name_part)
+        if alias:
+            variants.append(alias)
+        scored.append([(_norm(v), _py_full(v)) for v in variants])
+
+    def rank(rows, field):
+        out = []
+        for r in rows:
+            s = max((_relevance(sn, sp, r, field)
+                     for variants in scored for sn, sp in variants[:1]),
+                    default=0.0)
+            sa = max((_relevance(sn, sp, r, field)
+                      for variants in scored for sn, sp in variants[1:]),
+                     default=0.0)
+            out.append((s, sa, r))
+        out.sort(key=lambda x: -(x[0] + x[1]))
+        top = [r for s, sa, r in out[:n_items] if s > 0 or sa > 0]
+        # alias-matched rows always survive the cut
+        top += [r for s, sa, r in out[n_items:] if sa > 0 and r not in top]
+        return top or [r for _, _, r in out[:20]]
+
+    return (rank(customers, "customer_name")[:n_cust],
+            rank(items, "item_name"))
+
+
+def _fast_parse(text, customers, items):
+    """Instant local parse for clear-cut transcripts.
+    Returns the result dict, or None when anything is ambiguous (then the
+    caller falls back to the LLM)."""
+    segments = _seg_list(text)
+    if not segments:
+        return None
+    cust, cust_score, cust_i = None, 0, -1
+    for idx, seg in enumerate(segments):
+        sn, sp = _norm(seg), _py_full(seg)
+        for c in customers:
+            s = _relevance(sn, sp, c, "customer_name")
+            if s > cust_score:
+                cust, cust_score, cust_i = c, s, idx
+    if not cust or cust_score < 4:
+        return None
+    out = []
+    for idx, seg in enumerate(segments):
+        if idx == cust_i:
+            continue
+        name_part, qty = seg, 1
+        m = _QTY_TAIL.match(seg)
+        if m:
+            n = _cn_int(m.group(2))
+            if n and m.group(1).strip():
+                name_part = m.group(1).strip()
+                qty = n * 12 if (m.group(3) or "") == "箱" else n
+        alias = _alias_for(name_part)
+        if alias:
+            name_part = alias
+        sn, sp = _norm(name_part), _py_full(name_part)
+        best, bs = None, 0
+        for it in items:
+            s = _relevance(sn, sp, it, "item_name")
+            if sn and sn == _norm(it.get("item_code")):
+                s = max(s, 20.0)
+            if s > bs:
+                best, bs = it, s
+        if not best or bs < 6:
+            return None  # something we can't place -> LLM handles it
+        existing = next((x for x in out
+                         if x["item_code"] == best["item_code"]), None)
+        if existing:
+            existing["qty"] += qty
+            continue
+        out.append({"item_code": best["item_code"],
+                    "item_name": best.get("item_name", best["item_code"]),
+                    "uom": best.get("stock_uom", ""),
+                    "qty": qty, "phrase": name_part,
+                    "rate": _price_for(best["item_code"], cust["name"])})
+    if not out:
+        return None
+    return {"customer": {"name": cust["name"],
+                         "customer_name": cust["customer_name"]},
+            "customer_phrase": segments[cust_i],
+            "items": out, "unmatched": [], "notes": None}
+
+
 def _parse_transcript(text):
-    """Shared pipeline: transcript text -> customer + items + notes."""
+    """Shared pipeline: transcript text -> customer + items + notes.
+    Fast local parse first; LLM (kimi/codex CLI) only for hard cases."""
     with _cache_lock:
-        customers = [c["customer_name"] for c in _cache["customers"]]
-        items = [(i["item_code"], i.get("item_name", ""))
-                 for i in _cache["items"]]
+        all_customers = list(_cache["customers"])
+        all_items = list(_cache["items"])
+
+    fast = _fast_parse(text, all_customers, all_items)
+    if fast is not None:
+        return fast
+
+    customers, items = _prefilter_catalog(text, all_customers, all_items)
 
     prompt = _PARSE_PROMPT.format(
-        customers="、".join(customers),
-        items="；".join(f"{code}|{name}" for code, name in items),
+        customers="、".join(c["customer_name"] for c in customers),
+        items="；".join(f"{i['item_code']}|{i.get('item_name', '')}"
+                        for i in items),
         learned=_learned_hint())
     parsed = _llm_parse(prompt, text)
 
-    # map LLM output back to real records
+    # map LLM output back to real records (full catalog, not just prefiltered)
     customer = None
     if parsed.get("customer"):
-        with _cache_lock:
-            customer = next(
-                (c for c in _cache["customers"]
-                 if c["customer_name"] == parsed["customer"]
-                 or c["name"] == parsed["customer"]), None)
+        customer = next(
+            (c for c in all_customers
+             if c["customer_name"] == parsed["customer"]
+             or c["name"] == parsed["customer"]), None)
     out_items, unmatched = [], []
     for it in parsed.get("items") or []:
-        code = str(it.get("item_code") or "")
+        code = str(it.get("item_code") or "").strip()
+        if not code:
+            continue  # LLM returned an empty/placeholder row
         with _cache_lock:
             row = next((i for i in _cache["items"]
                         if i["item_code"] == code), None)
@@ -937,7 +1116,8 @@ def parse_audio():
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         f.save(tmp.name)
     try:
-        segments, _ = _whisper_model().transcribe(tmp.name, language="zh")
+        segments, _ = _whisper_model().transcribe(
+            tmp.name, language="zh", beam_size=1, vad_filter=True)
         text = "".join(s.text for s in segments).strip()
         if not text:
             return jsonify({"error": "没听清，请再试一次"}), 422
