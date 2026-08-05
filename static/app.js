@@ -581,8 +581,10 @@ function renderNewOrder() {
   view.innerHTML = `
     <button class="btn secondary" id="voice-order" style="margin-top:0">🎤 语音下单（客户 + 商品 + 数量）</button>
     <div id="voice-panel" class="card hidden">
+      <button class="btn danger" id="voice-record">🎤 按住说话</button>
+      <div class="meta" style="text-align:center;margin:6px 0">松开后自动识别并填入表单（需 HTTPS 打开）</div>
       <textarea id="voice-text" class="search-input" rows="3"
-        placeholder="点输入框，用键盘自带的 🎤 听写（或直接打字），例如：壹杯，雷司令三瓶，GG两瓶"></textarea>
+        placeholder="也可以点这里，用键盘自带的 🎤 听写或打字：壹杯，雷司令三瓶，GG两瓶"></textarea>
       <button class="btn" id="voice-parse">解析并填入表单</button>
     </div>
     <div class="section-title">客户</div>
@@ -630,6 +632,7 @@ function renderNewOrder() {
       document.getElementById("voice-text").focus();
   };
   document.getElementById("voice-parse").onclick = (e) => parseVoice(e.target);
+  bindRecordButton();
   loadWarehouses().then(() => {
     const sel = document.getElementById("no-warehouse");
     if (!sel) return;
@@ -790,9 +793,70 @@ async function saveNewOrder(submit) {
   }
 }
 
-/* ---------------- voice order dictation (Kimi parsing) ---------------- */
-// Transcription happens at the OS keyboard level (iOS/Android dictation mic),
-// which works in any browser incl. WeChat — no Web Speech API needed.
+/* ---------------- voice order dictation ---------------- */
+// Two input paths: (1) hold-to-record -> audio upload -> server transcribes
+// with local faster-whisper and parses with the kimi/codex CLI (needs HTTPS);
+// (2) textarea + OS keyboard dictation, works anywhere incl. WeChat.
+
+let mediaRec = null;
+let audioChunks = [];
+
+async function startRecording(btn) {
+  if (!window.isSecureContext || !navigator.mediaDevices || !window.MediaRecorder) {
+    toast("录音需要 HTTPS 打开（luciatrading.duckdns.org），或用下方键盘听写", 4500);
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioChunks = [];
+    mediaRec = new MediaRecorder(stream);
+    mediaRec.ondataavailable = e => audioChunks.push(e.data);
+    mediaRec.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      const blob = new Blob(audioChunks, { type: mediaRec.mimeType || "audio/mp4" });
+      uploadAudio(blob, btn);
+    };
+    mediaRec.start();
+    btn.textContent = "🔴 松开结束";
+    btn.classList.add("recording");
+  } catch (e) {
+    toast("无法打开麦克风：" + e.message, 4000);
+  }
+}
+
+function stopRecording(btn) {
+  if (mediaRec && mediaRec.state === "recording") {
+    btn.textContent = "识别中…";
+    btn.classList.remove("recording");
+    mediaRec.stop();
+  }
+}
+
+async function uploadAudio(blob, btn) {
+  try {
+    const fd = new FormData();
+    fd.append("audio", blob, "voice.m4a");
+    const r = await fetch("api/parse_audio", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+    document.getElementById("voice-text").value = d.text || "";
+    applyParsedOrder(d, d.text || "语音");
+  } catch (e) {
+    toast("识别失败：" + e.message, 5000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🎤 按住说话";
+  }
+}
+
+function bindRecordButton() {
+  const btn = document.getElementById("voice-record");
+  if (!btn) return;
+  btn.addEventListener("touchstart", e => { e.preventDefault(); startRecording(btn); });
+  btn.addEventListener("touchend", e => { e.preventDefault(); stopRecording(btn); });
+  btn.addEventListener("mousedown", () => startRecording(btn));
+  btn.addEventListener("mouseup", () => stopRecording(btn));
+}
 
 async function parseVoice(btn) {
   const text = document.getElementById("voice-text").value.trim();

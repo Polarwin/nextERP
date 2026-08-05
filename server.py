@@ -843,7 +843,16 @@ def parse_order():
     text = (request.get_json(force=True).get("text") or "").strip()
     if not text:
         return jsonify({"error": "text required"}), 400
+    try:
+        return jsonify(_parse_transcript(text))
+    except (RuntimeError, ValueError) as e:
+        return jsonify({"error": f"解析服务不可用:{e}"}), 502
+    except Exception as e:  # noqa: BLE001 - e.g. subprocess timeout
+        return jsonify({"error": f"解析超时或失败:{e}"}), 502
 
+
+def _parse_transcript(text):
+    """Shared pipeline: transcript text -> customer + items + notes."""
     with _cache_lock:
         customers = [c["customer_name"] for c in _cache["customers"]]
         items = [(i["item_code"], i.get("item_name", ""))
@@ -853,12 +862,7 @@ def parse_order():
         customers="、".join(customers),
         items="；".join(f"{code}|{name}" for code, name in items),
         learned=_learned_hint())
-    try:
-        parsed = _llm_parse(prompt, text)
-    except (RuntimeError, ValueError) as e:
-        return jsonify({"error": f"解析服务不可用:{e}"}), 502
-    except Exception as e:  # noqa: BLE001 - e.g. subprocess timeout
-        return jsonify({"error": f"解析超时或失败:{e}"}), 502
+    parsed = _llm_parse(prompt, text)
 
     # map LLM output back to real records
     customer = None
@@ -893,14 +897,59 @@ def parse_order():
                                customer["name"] if customer else None),
         })
 
-    return jsonify({
+    return {
         "customer": customer and {"name": customer["name"],
                                   "customer_name": customer["customer_name"]},
         "customer_phrase": parsed.get("customer_phrase"),
         "items": out_items,
         "unmatched": unmatched,
         "notes": parsed.get("notes"),
-    })
+    }
+
+
+# ------------------------------------------------------- voice transcription
+# Local faster-whisper (no API key). Model loads once in the background.
+
+_whisper = {"model": None, "lock": threading.Lock()}
+
+
+def _whisper_model():
+    if _whisper["model"] is None:
+        with _whisper["lock"]:
+            if _whisper["model"] is None:
+                from faster_whisper import WhisperModel
+                _whisper["model"] = WhisperModel(
+                    "small", device="cpu", compute_type="int8")
+    return _whisper["model"]
+
+
+threading.Thread(target=_whisper_model, daemon=True).start()
+
+
+@app.route("/api/parse_audio", methods=["POST"])
+def parse_audio():
+    """Audio upload -> whisper transcription -> LLM parse pipeline."""
+    f = request.files.get("audio")
+    if not f:
+        return jsonify({"error": "audio file required"}), 400
+    import tempfile
+    suffix = os.path.splitext(f.filename or "")[1] or ".m4a"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        f.save(tmp.name)
+    try:
+        segments, _ = _whisper_model().transcribe(tmp.name, language="zh")
+        text = "".join(s.text for s in segments).strip()
+        if not text:
+            return jsonify({"error": "没听清，请再试一次"}), 422
+        result = _parse_transcript(text)
+        result["text"] = text
+        return jsonify(result)
+    except (RuntimeError, ValueError) as e:
+        return jsonify({"error": f"解析服务不可用:{e}"}), 502
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"识别失败:{e}"}), 500
+    finally:
+        os.unlink(tmp.name)
 
 
 @app.route("/api/deliveries")
