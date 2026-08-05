@@ -900,7 +900,7 @@ function startJokes() {
   const show = () => { box.textContent = "😄 " + JOKES[i++ % JOKES.length]; };
   box.classList.remove("hidden");
   show();
-  jokeTimer = setInterval(show, 3500);
+  jokeTimer = setInterval(show, 6000);
 }
 
 function stopJokes() {
