@@ -658,39 +658,56 @@ def update_order(name):
 
 
 def _price_for(item_code, customer):
-    """Default selling rate (mirrors /api/item_price logic)."""
-    price_list = None
-    if customer:
-        with _cache_lock:
-            cust = next((c for c in _cache["customers"]
-                         if c.get("name") == customer), None)
-        price_list = (cust or {}).get("default_price_list")
-    if not price_list:
-        price_list = get_default_price_list()
-    r = erp.call("GET", "/api/resource/Item Price", params={
-        "fields": json.dumps(["price_list_rate"]),
-        "filters": json.dumps([["item_code", "=", item_code],
-                               ["price_list", "=", price_list],
-                               ["selling", "=", 1]]),
-        "limit_page_length": 1,
-    })
-    data = r.json().get("data", [])
-    return data[0]["price_list_rate"] if data else 0.0
+    """Default selling rate (mirrors /api/item_price logic).
+    Network hiccups to the ERP must not fail the whole parse -> rate 0."""
+    try:
+        price_list = None
+        if customer:
+            with _cache_lock:
+                cust = next((c for c in _cache["customers"]
+                             if c.get("name") == customer), None)
+            price_list = (cust or {}).get("default_price_list")
+        if not price_list:
+            price_list = get_default_price_list()
+        r = erp.call("GET", "/api/resource/Item Price", params={
+            "fields": json.dumps(["price_list_rate"]),
+            "filters": json.dumps([["item_code", "=", item_code],
+                                   ["price_list", "=", price_list],
+                                   ["selling", "=", 1]]),
+            "limit_page_length": 1,
+        })
+        data = r.json().get("data", [])
+        return data[0]["price_list_rate"] if data else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
 
 
 # ------------------------------------------------------- voice order parsing
-# Uses the local Codex CLI (logged-in ChatGPT account, no API key needed) —
-# same approach as the Recipes app.
+# LLM backends are local CLIs with subscription logins — no API keys needed:
+# kimi -p (Kimi Code CLI) is primary, codex exec (ChatGPT) is the fallback.
+# Same approach as the Recipes app.
+
+VOICE_LLM_BACKENDS = ["kimi", "codex"]
 
 _PARSE_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "voice-parse-schema.json")
 
 
-def _codex_parse(prompt, user_text):
-    """Run codex exec with a strict JSON output schema; return parsed dict."""
+def _kimi_parse(full_prompt):
+    import subprocess
+    r = subprocess.run(
+        ["kimi", "-p", full_prompt + "\n\n只输出一个JSON对象，不要任何其他文字、解释或标记。"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True, text=True, timeout=240, check=False)
+    m = re.search(r"\{.*\}", r.stdout, re.S)
+    if not m:
+        raise RuntimeError(f"kimi 输出中无 JSON: {r.stdout[-200:]}")
+    return json.loads(m.group(0))
+
+
+def _codex_parse(full_prompt):
     import subprocess
     import tempfile
-    full_prompt = prompt + "\n\n口述订单:" + user_text
     with tempfile.TemporaryDirectory() as tmp:
         out_file = os.path.join(tmp, "parsed.json")
         r = subprocess.run(
@@ -708,6 +725,51 @@ def _codex_parse(prompt, user_text):
                 f"{(r.stderr or r.stdout)[-300:]}")
 
 
+def _llm_parse(prompt, user_text):
+    full_prompt = prompt + "\n\n口述订单:" + user_text
+    errors = []
+    for backend in VOICE_LLM_BACKENDS:
+        fn = {"kimi": _kimi_parse, "codex": _codex_parse}[backend]
+        try:
+            return fn(full_prompt)
+        except Exception as e:  # noqa: BLE001 - try next backend
+            errors.append(f"{backend}: {e}")
+    raise RuntimeError("; ".join(errors))
+
+
+def _norm(s):
+    return str(s or "").lower().replace(" ", "")
+
+
+_LEARN_FILE = "learned_aliases.json"
+
+
+def _load_learned():
+    try:
+        with open(_LEARN_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"items": {}, "customers": {}}
+
+
+def _save_learned(data):
+    with open(_LEARN_FILE, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+
+
+def _learned_hint():
+    """Render learned aliases as a prompt section (empty string if none)."""
+    data = _load_learned()
+    lines = []
+    for norm, a in data.get("items", {}).items():
+        lines.append(f"「{a['phrase']}」= {a['item_code']}({a.get('item_name', '')[:20]})")
+    for norm, a in data.get("customers", {}).items():
+        lines.append(f"「{a['phrase']}」= 客户 {a['customer']}")
+    if not lines:
+        return ""
+    return ("\n用户纠正习惯（最高优先级，必须遵循）:\n" + "\n".join(lines) + "\n")
+
+
 _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口述一张订单，你要提取客户和商品明细。
 
 客户列表（名称|简称可能不完整，口述常有同音字）:
@@ -715,13 +777,64 @@ _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口�
 
 商品列表（货号|名称）:
 {items}
-
+{learned}
 规则：
 - 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。
 - 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
 - 数量：中文或阿拉伯数字，单位瓶/箱等。一箱=12瓶。没说数量默认1瓶。
+- 每个商品和客户都要回传口述中的原话片段（phrase / customer_phrase)，用于学习。
 - 只输出 JSON，不要任何其他文字：
-{{"customer": "客户列表中的准确名称或 null", "items": [{{"item_code": "货号", "qty": 数量}}], "notes": "不确定之处或 null"}}"""
+{{"customer": "客户列表中的准确名称或 null", "customer_phrase": "原话或 null", "items": [{{"item_code": "货号", "qty": 数量, "phrase": "原话"}}], "notes": "不确定之处或 null"}}"""
+
+
+@app.route("/api/learn", methods=["POST"])
+def learn_aliases():
+    """Compare the parsed draft with what the user actually submitted and
+    record phrase -> item/customer corrections into learned_aliases.json."""
+    payload = request.get_json(force=True)
+    parsed = payload.get("parsed") or {}
+    final = payload.get("final") or {}
+    data = _load_learned()
+    learned = []
+
+    final_codes = [i["item_code"] for i in final.get("items", [])]
+    parsed_items = parsed.get("items", [])
+    parsed_codes = [i["item_code"] for i in parsed_items]
+    new_items = [i for i in final.get("items", [])
+                 if i["item_code"] not in parsed_codes]
+
+    for p in parsed_items:
+        phrase = (p.get("phrase") or "").strip()
+        if not phrase or p["item_code"] in final_codes:
+            continue  # kept as parsed — nothing to learn
+        # find the replacement: unique new item, or same-qty match
+        cands = new_items
+        if len(cands) != 1:
+            same_qty = [i for i in new_items if i.get("qty") == p.get("qty")]
+            cands = same_qty if len(same_qty) == 1 else []
+        if len(cands) != 1:
+            continue  # ambiguous — skip rather than learn wrong
+        rep = cands[0]
+        entry = {"phrase": phrase, "item_code": rep["item_code"],
+                 "item_name": rep.get("item_name", "")}
+        for key in {_norm(phrase), _py_full(phrase)}:
+            if key:
+                data["items"][key] = entry
+        learned.append(f"{phrase} → {rep['item_code']}")
+
+    pc = (parsed.get("customer_phrase") or "").strip()
+    parsed_cust = (parsed.get("customer") or {}).get("customer_name")
+    final_cust = final.get("customer_name")
+    if pc and final_cust and parsed_cust and parsed_cust != final_cust:
+        entry = {"phrase": pc, "customer": final_cust}
+        for key in {_norm(pc), _py_full(pc)}:
+            if key:
+                data["customers"][key] = entry
+        learned.append(f"{pc} → 客户 {final_cust}")
+
+    if learned:
+        _save_learned(data)
+    return jsonify({"learned": learned})
 
 
 @app.route("/api/parse_order", methods=["POST"])
@@ -738,9 +851,10 @@ def parse_order():
 
     prompt = _PARSE_PROMPT.format(
         customers="、".join(customers),
-        items="；".join(f"{code}|{name}" for code, name in items))
+        items="；".join(f"{code}|{name}" for code, name in items),
+        learned=_learned_hint())
     try:
-        parsed = _codex_parse(prompt, text)
+        parsed = _llm_parse(prompt, text)
     except (RuntimeError, ValueError) as e:
         return jsonify({"error": f"解析服务不可用:{e}"}), 502
     except Exception as e:  # noqa: BLE001 - e.g. subprocess timeout
@@ -774,6 +888,7 @@ def parse_order():
             "item_name": row.get("item_name", row["item_code"]),
             "uom": row.get("stock_uom", ""),
             "qty": qty,
+            "phrase": it.get("phrase", ""),
             "rate": _price_for(row["item_code"],
                                customer["name"] if customer else None),
         })
@@ -781,6 +896,7 @@ def parse_order():
     return jsonify({
         "customer": customer and {"name": customer["name"],
                                   "customer_name": customer["customer_name"]},
+        "customer_phrase": parsed.get("customer_phrase"),
         "items": out_items,
         "unmatched": unmatched,
         "notes": parsed.get("notes"),

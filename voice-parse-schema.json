@@ -5,15 +5,20 @@
       "type": ["string", "null"],
       "description": "客户列表中最匹配的准确客户名称，没有把握为 null"
     },
+    "customer_phrase": {
+      "type": ["string", "null"],
+      "description": "口述中指代客户的原话片段，如“一杯”“万杯”"
+    },
     "items": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "item_code": {"type": "string", "description": "商品货号"},
-          "qty": {"type": "number", "description": "数量（瓶）"}
+          "qty": {"type": "number", "description": "数量（瓶）"},
+          "phrase": {"type": "string", "description": "口述中指代该商品的原话片段，如“jiji”“丹魄”"}
         },
-        "required": ["item_code", "qty"],
+        "required": ["item_code", "qty", "phrase"],
         "additionalProperties": false
       }
     },
@@ -22,6 +27,6 @@
       "description": "不确定或需要用户确认的地方，没有为 null"
     }
   },
-  "required": ["customer", "items", "notes"],
+  "required": ["customer", "customer_phrase", "items", "notes"],
   "additionalProperties": false
 }

@@ -763,6 +763,23 @@ async function saveNewOrder(submit) {
       }),
     });
     toast(submit ? `订单 ${o.name} 已提交` : `订单 ${o.name} 已保存为草稿`);
+    // auto-learn: diff the voice-parsed draft against what was submitted
+    if (no.voice) {
+      api("/api/learn", {
+        method: "POST",
+        body: JSON.stringify({
+          parsed: no.voice.parsed,
+          final: {
+            customer_name: no.customer_name,
+            items: items.map(it => ({ item_code: it.item_code,
+                                      item_name: it.item_name, qty: it.qty })),
+          },
+        }),
+      }).then(r => {
+        if (r.learned && r.learned.length)
+          toast("已记住纠正：" + r.learned.join("，"), 4000);
+      }).catch(() => {});
+    }
     no = null;
     if (submit) openPdf("Sales Order", o.name);
     stack = [];
@@ -798,6 +815,7 @@ async function parseVoice(btn) {
 
 function applyParsedOrder(d, text) {
   if (!no) return;
+  no.voice = { text, parsed: d };  // kept for auto-learning on submit
   if (d.customer) {
     no.customer = d.customer.name;
     no.customer_name = d.customer.customer_name;

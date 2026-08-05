@@ -14,6 +14,7 @@ __pycache__/
 cache/
 alerts_state.json
 app_config.json
+learned_aliases.json
 
 # test artifacts
 login_result.png
