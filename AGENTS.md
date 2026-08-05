@@ -40,6 +40,12 @@ it works under the `/luciatrading/` prefix and standalone.
   `/etc/caddy/Caddyfile` and `/etc/frp/frpc.toml` — never overwrite**, keep
   the existing frp token, and use `caddy reload` / `frpc reload` (hot) so
   other apps are not interrupted.
+- LAN HTTPS: mkcert CA (`~/.local/share/mkcert`), cert for 192.168.0.9 in
+  `certs/` (gitignored, expires 2028-11), nginx serves 443 in the same
+  homeserver block. CA is downloadable at `/lucia/mkcert-ca.pem` for phone
+  install (Android: Settings → Security & privacy → Encryption & credentials
+  → Install a certificate → CA; iOS: profile + Certificate Trust Settings).
+  Needed because browsers only allow microphone over HTTPS.
 - Credentials live in `.env` (`website`, `username`, `password`) and must
   stay server-side — never print them, never send them to the browser.
 - Public auth: requests whose Host is `luciatrading.duckdns.org` require a

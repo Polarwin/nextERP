@@ -19,6 +19,9 @@ learned_aliases.json
 # test artifacts
 login_result.png
 
+# TLS (mkcert) private keys — never commit
+certs/
+
 # company website lives on the "www" branch; local untracked copy is the
 # live deployment (symlinked from /srv/www/lucia)
 site/
