@@ -581,6 +581,7 @@ function renderNewOrder() {
   view.innerHTML = `
     <button class="btn secondary" id="voice-order" style="margin-top:0">🎤 语音下单（客户 + 商品 + 数量）</button>
     <div id="voice-panel" class="card hidden">
+      <div id="joke-box" class="hidden" style="text-align:center;color:var(--muted);font-size:14px;padding:6px 0"></div>
       <button class="btn danger" id="voice-record">🎤 按住说话</button>
       <div class="meta" style="text-align:center;margin:6px 0">松开后自动识别并填入表单（需 HTTPS 打开）</div>
       <textarea id="voice-text" class="search-input" rows="3"
@@ -833,6 +834,7 @@ function stopRecording(btn) {
 }
 
 async function uploadAudio(blob, btn) {
+  startJokes();
   try {
     const fd = new FormData();
     fd.append("audio", blob, "voice.m4a");
@@ -844,6 +846,7 @@ async function uploadAudio(blob, btn) {
   } catch (e) {
     toast("识别失败：" + e.message, 5000);
   } finally {
+    stopJokes();
     btn.disabled = false;
     btn.textContent = "🎤 按住说话";
   }
@@ -858,11 +861,59 @@ function bindRecordButton() {
   btn.addEventListener("mouseup", () => stopRecording(btn));
 }
 
+/* ---- waiting-room jokes (slow LLM path only) ---- */
+
+const JOKES = [
+  "Lucia 是吕莎的谐音——这家公司从注册那天起就在撒狗粮。",
+  "本系统最终解释权归吕莎所有。",
+  "给 Lucia 做的系统，慢一秒钟都算重大事故。",
+  "壹杯葡萄酒商店和万杯贸易之间，隔着九千九百九十九杯缘分。",
+  "万杯：人生得意须尽欢，一次下单一万杯。",
+  "爱沐莎：酒还没醒，先爱上这个名字。",
+  "雷司酒业：我们不生产雷司令，我们只是雷司令的搬运工。",
+  "酒窝家的酒，喝完笑起来更明显。",
+  "泰晤士的酒窝：伦敦都没你会装（6 glasses)。",
+  "葡道：条条大路通罗马，瓶瓶好酒通胃口。",
+  "左泉：左边的泉酿的酒，流到右边的杯里。",
+  "AI 正在加班找 jiji，老板娘请稍后。",
+  "它思考的样子，像极了周一早上没喝咖啡的我。",
+  "早C晚A：早上 Coffee，晚上 Alcohol，中间等接口。",
+  "说好的 AI 替代人工，结果它先学会了摸鱼。",
+  "世界上最远的距离：我在等加载，加载在等我。",
+  "我这不是懒，我这是低功耗模式。",
+  "雷司令宣言：我不是针对谁，在座的干白都很一般。",
+  "GG 雷司令：Grosses Gewächs，翻译过来就是「大大的好喝」。",
+  "别人存酒，我存表情包，都是长线投资。",
+  "年轻时我以为钱很重要，现在发现，确实如此—— especially 卖酒的钱。",
+  "人生就像提现，永远只差一点点。",
+  "客服：您的问题我们非常重视，正在为您转接…下一首音乐。",
+];
+
+let jokeTimer = null;
+
+function startJokes() {
+  const box = document.getElementById("joke-box");
+  if (!box) return;
+  let i = Math.floor(Math.random() * JOKES.length);
+  const show = () => { box.textContent = "😄 " + JOKES[i++ % JOKES.length]; };
+  box.classList.remove("hidden");
+  show();
+  jokeTimer = setInterval(show, 3500);
+}
+
+function stopJokes() {
+  clearInterval(jokeTimer);
+  jokeTimer = null;
+  const box = document.getElementById("joke-box");
+  if (box) box.classList.add("hidden");
+}
+
 async function parseVoice(btn) {
   const text = document.getElementById("voice-text").value.trim();
   if (!text) { toast("先听写或输入订单内容"); return; }
   btn.disabled = true;
   btn.textContent = "解析中…";
+  startJokes();
   try {
     const d = await api("/api/parse_order", {
       method: "POST",
@@ -872,6 +923,7 @@ async function parseVoice(btn) {
   } catch (e) {
     toast("解析失败：" + e.message, 5000);
   } finally {
+    stopJokes();
     btn.disabled = false;
     btn.textContent = "解析并填入表单";
   }
