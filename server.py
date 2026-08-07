@@ -873,6 +873,10 @@ _QTY_TAIL = re.compile(
 
 _STATIC_ALIASES = {"jiji": "GG", "jj": "GG", "吉吉": "GG"}
 
+# too generic to auto-pick — let the LLM handle with an ambiguity note
+_GENERIC_TERMS = {"雷司令", "莫斯卡托", "干白", "干红", "红酒", "葡萄酒",
+                  "起泡酒", "桃红", "甜白", "白酒", "riesling", "moscato"}
+
 _QTY_ONLY = re.compile(
     r"^([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
     r"(瓶|箱|盒|个|支|件|听)?$")
@@ -1015,6 +1019,8 @@ def _fast_parse(text, customers, items):
         alias = _alias_for(name_part)
         if alias:
             name_part = alias
+        if _norm(name_part) in _GENERIC_TERMS:
+            return None  # too vague (just 雷司令 etc.) -> LLM decides
         sn, sp = _norm(name_part), _py_full(name_part)
         best, bs = None, 0
         for it in items:
