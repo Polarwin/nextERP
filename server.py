@@ -1103,6 +1103,28 @@ def _parse_transcript(text):
 _whisper = {"model": None, "lock": threading.Lock()}
 
 
+def _hotwords():
+    """Domain vocabulary for whisper: item short names + codes + customer
+    names, so 美鸭鸭/幸运甜心犬 etc. are recognized instead of drifting."""
+    words = []
+    with _cache_lock:
+        items = list(_cache["items"])
+        customers = list(_cache["customers"])
+    for it in items:
+        name = it.get("item_name") or ""
+        # distinctive leading CJK part (美鸭鸭莫斯卡托...) + item code
+        lead = re.match(r"[一-鿿]{2,10}", name)
+        if lead:
+            words.append(lead.group(0))
+        if it.get("item_code"):
+            words.append(it["item_code"])
+    for c in customers:
+        if c.get("customer_name"):
+            words.append(c["customer_name"])
+    words += ["雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
+    return "，".join(words)[:1500]
+
+
 def _whisper_model():
     if _whisper["model"] is None:
         with _whisper["lock"]:
@@ -1150,7 +1172,9 @@ def parse_audio():
         f.save(tmp.name)
     try:
         segments, _ = _whisper_model().transcribe(
-            tmp.name, language="zh", beam_size=1, vad_filter=True)
+            tmp.name, language="zh", beam_size=1, vad_filter=True,
+            hotwords=_hotwords(),
+            initial_prompt="葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。")
         text = "".join(s.text for s in segments).strip()
         if not text:
             _save_recording(tmp.name, suffix, "")
