@@ -1142,6 +1142,8 @@ def _hotwords():
         for m in re.finditer(r"[一-鿿]{2,5}园", name):
             short = re.sub(r"^.*村", "", m.group(0))
             names.append(short)                  # 天梯园 / 日晷园 / 森林园
+            if "GG" in name:
+                names.append(short + "GG")       # 天梯园GG / 森林园GG
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
               "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
