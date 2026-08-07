@@ -1138,15 +1138,19 @@ def _hotwords():
             m = re.match(r"[一-鿿]{2,8}", stripped)
             if m:
                 names.append(m.group(0)[:8])     # 丹魄干红 / 雷司令干白
-        names.extend(m.group(0)                  # 天梯园 / 香料园 / 森林园
-                     for m in re.finditer(r"[一-鿿]{2,4}园", name))
-    names += ["雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "甜心犬", "美鸭鸭",
-              "瓶", "箱"]
+        # vineyard names the way people SAY them: 艾尔登村天梯园 -> 天梯园
+        for m in re.finditer(r"[一-鿿]{2,5}园", name):
+            short = re.sub(r"^.*村", "", m.group(0))
+            names.append(short)                  # 天梯园 / 日晷园 / 森林园
+    names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
+              "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
+              "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
     cust_names = [c["customer_name"] for c in customers
                   if c.get("customer_name")]
     # whisper only keeps the END of a long prompt (~few hundred chars), so
-    # order by importance: customers first (may be dropped), distinctive
-    # item names last (always survive)
+    # order by importance: codes & customers first (may be dropped), the
+    # spoken short forms last (always survive)
+    names = list(dict.fromkeys(names))           # dedupe, keep order
     return "，".join(codes + cust_names + names)[-1600:]
 
 
