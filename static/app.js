@@ -76,7 +76,12 @@ async function sharePdf(doctype, name, btn, customer) {
     const blob = await r.blob();
     const label2 = `${(customer || "").trim()} ${name}`.trim();
     const file = new File([blob], `${label2}.pdf`, { type: "application/pdf" });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    // Inside WeChat's built-in browser, sharing a file to WeChat via the
+    // system share sheet just loops back to this page (WeChat resumes its
+    // own activity instead of opening the friend picker). Skip the share
+    // sheet there and go straight to the download fallback.
+    const inWechat = /MicroMessenger/i.test(navigator.userAgent);
+    if (!inWechat && navigator.canShare && navigator.canShare({ files: [file] })) {
       await navigator.share({ files: [file], title: label2 });
     } else {
       // fallback: trigger a download so it lands in Files/Downloads
@@ -86,7 +91,9 @@ async function sharePdf(doctype, name, btn, customer) {
       a.download = `${label2}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
-      toast("PDF 已下载，可在文件中分享");
+      toast(inWechat
+        ? "PDF 已下载：打开下载的文件，点右上角 ⋯ 转发给朋友。（或用浏览器打开本页再分享）"
+        : "PDF 已下载，可在文件中分享", 6000);
     }
   } catch (e) {
     if (e.name !== "AbortError") toast("分享失败：" + e.message, 4000);
