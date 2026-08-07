@@ -779,7 +779,8 @@ async function saveNewOrder(submit) {
       api("/api/learn", {
         method: "POST",
         body: JSON.stringify({
-          parsed: no.voice.parsed,
+          text: no.voice.text,
+          parsed: no.voice.parsed || {},
           final: {
             customer_name: no.customer_name,
             items: items.map(it => ({ item_code: it.item_code,
@@ -925,6 +926,7 @@ function stopJokes() {
 async function parseVoice(btn) {
   const text = document.getElementById("voice-text").value.trim();
   if (!text) { toast("先听写或输入订单内容"); return; }
+  if (no) no.voice = { text, parsed: null };  // log attempt even if parse fails
   btn.disabled = true;
   btn.textContent = "解析中…";
   startJokes();

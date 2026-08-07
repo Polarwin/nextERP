@@ -15,6 +15,8 @@ cache/
 alerts_state.json
 app_config.json
 learned_aliases.json
+recordings/
+voice_attempts.jsonl
 
 # test artifacts
 login_result.png

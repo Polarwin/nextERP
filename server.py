@@ -794,6 +794,17 @@ def learn_aliases():
     payload = request.get_json(force=True)
     parsed = payload.get("parsed") or {}
     final = payload.get("final") or {}
+
+    # voice attempt but parse produced nothing (user built the order by
+    # hand): log the attempt with the final order for later review/learning
+    if not parsed.get("items") and not parsed.get("customer"):
+        with open("voice_attempts.jsonl", "a") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "text": payload.get("text"), "final": final},
+                ensure_ascii=False) + "\n")
+        return jsonify({"learned": []})
+
     data = _load_learned()
     learned = []
 
@@ -1105,9 +1116,31 @@ def _whisper_model():
 threading.Thread(target=_whisper_model, daemon=True).start()
 
 
+RECORDINGS_DIR = "recordings"
+
+
+def _save_recording(tmp_path, suffix, text):
+    """Keep every voice recording + transcript for later review/learning."""
+    os.makedirs(RECORDINGS_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = os.path.join(RECORDINGS_DIR, f"{ts}{suffix}")
+    # avoid same-second collisions
+    n = 1
+    while os.path.exists(dest):
+        dest = os.path.join(RECORDINGS_DIR, f"{ts}-{n}{suffix}")
+        n += 1
+    import shutil
+    shutil.move(tmp_path, dest)
+    with open(os.path.join(RECORDINGS_DIR, "index.jsonl"), "a") as f:
+        f.write(json.dumps({"file": os.path.basename(dest), "text": text,
+                            "ts": ts}, ensure_ascii=False) + "\n")
+    return dest
+
+
 @app.route("/api/parse_audio", methods=["POST"])
 def parse_audio():
-    """Audio upload -> whisper transcription -> LLM parse pipeline."""
+    """Audio upload -> whisper transcription -> LLM parse pipeline.
+    Recordings are kept in recordings/ for later review/learning."""
     f = request.files.get("audio")
     if not f:
         return jsonify({"error": "audio file required"}), 400
@@ -1120,16 +1153,18 @@ def parse_audio():
             tmp.name, language="zh", beam_size=1, vad_filter=True)
         text = "".join(s.text for s in segments).strip()
         if not text:
+            _save_recording(tmp.name, suffix, "")
             return jsonify({"error": "没听清，请再试一次"}), 422
         result = _parse_transcript(text)
         result["text"] = text
+        _save_recording(tmp.name, suffix, text)
         return jsonify(result)
     except (RuntimeError, ValueError) as e:
+        _save_recording(tmp.name, suffix, f"[error] {e}")
         return jsonify({"error": f"解析服务不可用:{e}"}), 502
     except Exception as e:  # noqa: BLE001
+        _save_recording(tmp.name, suffix, f"[error] {e}")
         return jsonify({"error": f"识别失败:{e}"}), 500
-    finally:
-        os.unlink(tmp.name)
 
 
 @app.route("/api/deliveries")
