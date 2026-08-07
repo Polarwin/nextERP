@@ -871,7 +871,9 @@ _QTY_TAIL = re.compile(
     r"^(.*?)\s*([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
     r"(瓶|箱|盒|个|支|件|听)?$")
 
-_STATIC_ALIASES = {"jiji": "GG", "jj": "GG", "吉吉": "GG"}
+_STATIC_ALIASES = {"jiji": "GG", "jj": "GG", "吉吉": "GG",
+                   "herman干白": "赫曼博士酒庄雷司令干白",
+                   "赫曼干白": "赫曼博士酒庄雷司令干白"}
 
 # too generic to auto-pick — let the LLM handle with an ambiguity note
 _GENERIC_TERMS = {"雷司令", "莫斯卡托", "干白", "干红", "红酒", "葡萄酒",
@@ -1152,6 +1154,7 @@ def _hotwords():
                 names.append(short + "GG")       # 天梯园GG / 森林园GG
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
               "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
+              "herman干白", "赫曼干白",
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
     cust_names = [c["customer_name"] for c in customers
                   if c.get("customer_name")]
