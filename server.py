@@ -782,6 +782,7 @@ _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口�
 - 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。
 - 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
 - 数量：中文或阿拉伯数字，单位瓶/箱等。一箱=12瓶。没说数量默认1瓶。
+- 年份：未指明年份时选最新年份（如同时有22和25，选25)。
 - 每个商品和客户都要回传口述中的原话片段（phrase / customer_phrase)，用于学习。
 - 只输出 JSON，不要任何其他文字：
 {{"customer": "客户列表中的准确名称或 null", "customer_phrase": "原话或 null", "items": [{{"item_code": "货号", "qty": 数量, "phrase": "原话"}}], "notes": "不确定之处或 null"}}"""
@@ -915,6 +916,15 @@ def _alias_for(seg):
     return None
 
 
+def _vintage(row):
+    """Vintage year from item code suffix (GH001-25 -> 2025) or name."""
+    m = re.search(r"-(\d{2})$", row.get("item_code") or "")
+    if m:
+        return 2000 + int(m.group(1))
+    m = re.search(r"(19|20)(\d{2})", row.get("item_name") or "")
+    return int(m.group(0)) if m else 0
+
+
 def _relevance(seg_n, seg_py, row, name_field):
     """Quick relevance of a transcript segment to a catalog row."""
     name_n = _norm(row.get(name_field))
@@ -1011,7 +1021,10 @@ def _fast_parse(text, customers, items):
             s = _relevance(sn, sp, it, "item_name")
             if sn and sn == _norm(it.get("item_code")):
                 s = max(s, 20.0)
-            if s > bs:
+            # prefer the latest vintage when relevance is tied
+            if s > bs + 0.01 or \
+                    (best is not None and abs(s - bs) <= 0.01
+                     and _vintage(it) > _vintage(best)):
                 best, bs = it, s
         if not best or bs < 6:
             return None  # something we can't place -> LLM handles it
