@@ -871,13 +871,15 @@ _QTY_TAIL = re.compile(
     r"^(.*?)\s*([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
     r"(瓶|箱|盒|个|支|件|听)?$")
 
-_STATIC_ALIASES = {"jiji": "GG", "jj": "GG", "吉吉": "GG",
-                   "herman干白": "赫曼博士酒庄雷司令干白",
-                   "赫曼干白": "赫曼博士酒庄雷司令干白"}
-
 # too generic to auto-pick — let the LLM handle with an ambiguity note
 _GENERIC_TERMS = {"雷司令", "莫斯卡托", "干白", "干红", "红酒", "葡萄酒",
                   "起泡酒", "桃红", "甜白", "白酒", "riesling", "moscato"}
+
+# distinguishing traits of wines sharing a vineyard name
+_TRAITS = ["gg", "珍藏", "晚摘", "串选", "粒选", "金盖", "tba", "枯萄",
+           "半甜", "冰白", "老藤", "6号", "一星", "凌岩坡"]
+
+_VOICE_ALIAS_FILE = "voice_aliases.json"
 
 _QTY_ONLY = re.compile(
     r"^([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
@@ -911,14 +913,27 @@ def _cn_int(s):
     return _CN_DIGITS.get(s) if len(s) == 1 else None
 
 
+def _traits(name):
+    n = _norm(name)
+    return frozenset(t for t in _TRAITS if t in n)
+
+
 def _alias_for(seg):
-    """Static + learned aliases for a spoken segment (by text or pinyin)."""
-    for table in (_STATIC_ALIASES,
-                  {k: v["item_code"] for k, v
-                   in _load_learned().get("items", {}).items()}):
-        for key in (_norm(seg), _py_full(seg)):
-            if key in table:
-                return table[key]
+    """Spoken segment -> alias value: exact item_code from voice_aliases.json
+    (user-curated), then learned corrections."""
+    try:
+        with open(_VOICE_ALIAS_FILE) as f:
+            aliases = json.load(f)
+    except (OSError, ValueError):
+        aliases = {}
+    for key in (seg, _norm(seg), _py_full(seg)):
+        if key in aliases:
+            return aliases[key]
+    learned = {k: v["item_code"] for k, v
+               in _load_learned().get("items", {}).items()}
+    for key in (_norm(seg), _py_full(seg)):
+        if key in learned:
+            return learned[key]
     return None
 
 
@@ -1036,6 +1051,13 @@ def _fast_parse(text, customers, items):
                 best, bs = it, s
         if not best or bs < 6:
             return None  # something we can't place -> LLM handles it
+        # bare vineyard name tying across different traits (天梯园 -> GG vs
+        # 珍藏 vs 晚摘 vs 串选)? ambiguous -> LLM with a clarifying note
+        tied = [it for it in items
+                if it is not best and bs > 0 and
+                abs(_relevance(sn, sp, it, "item_name") - bs) <= 0.01]
+        if len({_traits(it.get("item_name")) for it in [best, *tied]}) > 1:
+            return None
         existing = next((x for x in out
                          if x["item_code"] == best["item_code"]), None)
         if existing:
