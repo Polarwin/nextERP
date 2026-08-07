@@ -1117,25 +1117,37 @@ _whisper = {"model": None, "lock": threading.Lock()}
 
 
 def _hotwords():
-    """Domain vocabulary for whisper: item short names + codes + customer
-    names, so 美鸭鸭/幸运甜心犬 etc. are recognized instead of drifting."""
-    words = []
+    """Domain vocabulary for whisper: distinctive item short-names (winery
+    prefixes stripped, vineyard 园 names extracted), item codes, customer
+    names — so 甜心犬/美鸭鸭/天梯园 are heard correctly.
+    Whisper keeps the END of a long prompt, so customers go last."""
+    codes, names = [], []
     with _cache_lock:
         items = list(_cache["items"])
         customers = list(_cache["customers"])
     for it in items:
         name = it.get("item_name") or ""
-        # distinctive leading CJK part (美鸭鸭莫斯卡托...) + item code
-        lead = re.match(r"[一-鿿]{2,10}", name)
-        if lead:
-            words.append(lead.group(0))
         if it.get("item_code"):
-            words.append(it["item_code"])
-    for c in customers:
-        if c.get("customer_name"):
-            words.append(c["customer_name"])
-    words += ["雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
-    return "，".join(words)[:1500]
+            codes.append(it["item_code"])
+        lead = re.match(r"[一-鿿]{2,12}", name)
+        if not lead:
+            continue
+        names.append(lead.group(0)[:8])          # 幸运甜心犬莫斯卡 / 美鸭鸭莫斯卡托
+        stripped = re.sub(r"^[一-鿿]{2,6}酒庄", "", name)
+        if stripped != name:
+            m = re.match(r"[一-鿿]{2,8}", stripped)
+            if m:
+                names.append(m.group(0)[:8])     # 丹魄干红 / 雷司令干白
+        names.extend(m.group(0)                  # 天梯园 / 香料园 / 森林园
+                     for m in re.finditer(r"[一-鿿]{2,4}园", name))
+    names += ["雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "甜心犬", "美鸭鸭",
+              "瓶", "箱"]
+    cust_names = [c["customer_name"] for c in customers
+                  if c.get("customer_name")]
+    # whisper only keeps the END of a long prompt (~few hundred chars), so
+    # order by importance: customers first (may be dropped), distinctive
+    # item names last (always survive)
+    return "，".join(codes + cust_names + names)[-1600:]
 
 
 def _whisper_model():
