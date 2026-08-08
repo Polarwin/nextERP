@@ -795,19 +795,35 @@ def learn_aliases():
     payload = request.get_json(force=True)
     parsed = payload.get("parsed") or {}
     final = payload.get("final") or {}
+    data = _load_learned()
+    learned = []
+
+    # customer learning first — picker resolutions arrive with no items and
+    # must not fall into the "parse-less attempt" path below
+    pc = (parsed.get("customer_phrase") or "").strip()
+    parsed_cust = (parsed.get("customer") or {}).get("customer_name")
+    final_cust = final.get("customer_name")
+    # learn when the parse picked a different customer — or none at all
+    # (user resolved the ambiguity picker; don't ask again next time)
+    if pc and final_cust and parsed_cust != final_cust:
+        entry = {"phrase": pc, "customer": final_cust}
+        for key in {_norm(pc), _py_full(pc)}:
+            if key:
+                data["customers"][key] = entry
+        learned.append(f"{pc} → 客户 {final_cust}")
 
     # voice attempt but parse produced nothing (user built the order by
     # hand): log the attempt with the final order for later review/learning
     if not parsed.get("items") and not parsed.get("customer"):
-        with open("voice_attempts.jsonl", "a") as f:
-            f.write(json.dumps({
-                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-                "text": payload.get("text"), "final": final},
-                ensure_ascii=False) + "\n")
-        return jsonify({"learned": []})
-
-    data = _load_learned()
-    learned = []
+        if not learned:
+            with open("voice_attempts.jsonl", "a") as f:
+                f.write(json.dumps({
+                    "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                    "text": payload.get("text"), "final": final},
+                    ensure_ascii=False) + "\n")
+        if learned:
+            _save_learned(data)
+        return jsonify({"learned": learned})
 
     final_codes = [i["item_code"] for i in final.get("items", [])]
     parsed_items = parsed.get("items", [])
@@ -840,16 +856,6 @@ def learn_aliases():
             if key:
                 data["items"][key] = entry
         learned.append(f"{phrase} → {rep['item_code']}")
-
-    pc = (parsed.get("customer_phrase") or "").strip()
-    parsed_cust = (parsed.get("customer") or {}).get("customer_name")
-    final_cust = final.get("customer_name")
-    if pc and final_cust and parsed_cust and parsed_cust != final_cust:
-        entry = {"phrase": pc, "customer": final_cust}
-        for key in {_norm(pc), _py_full(pc)}:
-            if key:
-                data["customers"][key] = entry
-        learned.append(f"{pc} → 客户 {final_cust}")
 
     if learned:
         _save_learned(data)
@@ -936,11 +942,15 @@ def _alias_for(seg):
     for key in (seg, _norm(seg), _py_full(seg)):
         if key in aliases:
             return aliases[key]
-    learned = {k: v["item_code"] for k, v
-               in _load_learned().get("items", {}).items()}
-    for key in (_norm(seg), _py_full(seg)):
-        if key in learned:
-            return learned[key]
+    learned = _load_learned()
+    learned_items = {k: v["item_code"] for k, v
+                     in learned.get("items", {}).items()}
+    learned_custs = {k: v["customer"] for k, v
+                     in learned.get("customers", {}).items()}
+    for table in (learned_items, learned_custs):
+        for key in (_norm(seg), _py_full(seg)):
+            if key in table:
+                return table[key]
     return None
 
 
@@ -1104,6 +1114,8 @@ def _fast_parse(text, customers, items):
 def _parse_transcript(text):
     """Shared pipeline: transcript text -> customer + items + notes.
     Fast local parse first; LLM (kimi/codex CLI) only for hard cases."""
+    # whisper mishears 五瓶 as 物品 (wǔpíng/wùpǐn); the app never uses 物品
+    text = text.replace("物品", "五瓶")
     with _cache_lock:
         all_customers = list(_cache["customers"])
         all_items = list(_cache["items"])

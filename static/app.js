@@ -714,6 +714,19 @@ function pickCandidate(i) {
   no.customer_name = c.customer_name;
   no.candidates = null;
   renderNewOrder();
+  // learn the choice: next time this phrase auto-selects, no picker
+  const phrase = no.voice && no.voice.parsed && no.voice.parsed.customer_phrase;
+  if (phrase) {
+    api("/api/learn", {
+      method: "POST",
+      body: JSON.stringify({
+        parsed: { customer_phrase: phrase },
+        final: { customer_name: c.customer_name },
+      }),
+    }).then(r => {
+      if (r.learned && r.learned.length) toast("已记住：" + phrase + " → " + c.customer_name);
+    }).catch(() => {});
+  }
 }
 
 let searchTimers = {};
