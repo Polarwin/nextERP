@@ -603,6 +603,13 @@ function renderNewOrder() {
           <button class="link-btn" onclick="clearCustomer()">更换</button>
         </div>
       </div>
+      ${no.candidates && !no.customer ? `
+      <div id="cust-candidates">
+        <div class="meta" style="margin-bottom:6px">是哪个客户？</div>
+        ${no.candidates.map((c, i) => `
+          <button class="btn secondary" style="margin-top:6px" onclick="pickCandidate(${i})">${esc(c.customer_name)}</button>
+        `).join("")}
+      </div>` : ""}
       <div id="cust-search" class="${no.customer ? "hidden" : ""}">
         <input class="search-input" id="cust-q" placeholder="搜索客户名称…" autocomplete="off">
         <div id="cust-results"></div>
@@ -696,8 +703,17 @@ function noRemove(i) { no.items.splice(i, 1); renderNoItems(); }
 
 function clearCustomer() {
   no.customer = null; no.customer_name = null;
+  no.candidates = null;
   document.getElementById("cust-picked").classList.add("hidden");
   document.getElementById("cust-search").classList.remove("hidden");
+}
+
+function pickCandidate(i) {
+  const c = no.candidates[i];
+  no.customer = c.name;
+  no.customer_name = c.customer_name;
+  no.candidates = null;
+  renderNewOrder();
 }
 
 let searchTimers = {};
@@ -948,9 +964,15 @@ async function parseVoice(btn) {
 function applyParsedOrder(d, text) {
   if (!no) return;
   no.voice = { text, parsed: d };  // kept for auto-learning on submit
+  no.candidates = null;
   if (d.customer) {
     no.customer = d.customer.name;
     no.customer_name = d.customer.customer_name;
+  } else if (d.customer_candidates && d.customer_candidates.length) {
+    // ambiguous customer (e.g. 漾叶) — let the user pick
+    no.customer = null;
+    no.customer_name = null;
+    no.candidates = d.customer_candidates;
   }
   for (const it of d.items || []) {
     const ex = no.items.find(x => x.item_code === it.item_code);

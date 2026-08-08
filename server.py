@@ -1021,12 +1021,25 @@ def _fast_parse(text, customers, items):
     if not segments:
         return None
     cust, cust_score, cust_i = None, 0, -1
+    cust_candidates = None
     for idx, seg in enumerate(segments):
         sn, sp = _norm(seg), _py_full(seg)
+        alias = _alias_for(seg)  # customer aliases too (样液 -> DC1M上海漾叶)
+        best_here, bs_here = [], 0
         for c in customers:
-            s = _relevance(sn, sp, c, "customer_name")
-            if s > cust_score:
-                cust, cust_score, cust_i = c, s, idx
+            if alias and (c["name"] == alias
+                          or c.get("customer_name") == alias):
+                s = 25.0  # curated alias — beats fuzzy matches
+            else:
+                s = _relevance(sn, sp, c, "customer_name")
+            if s > bs_here + 0.01:
+                best_here, bs_here = [c], s
+            elif abs(s - bs_here) <= 0.01 and s > 0:
+                if all(c["name"] != x["name"] for x in best_here):
+                    best_here.append(c)
+        if bs_here > cust_score:
+            cust, cust_score, cust_i = best_here[0], bs_here, idx
+            cust_candidates = best_here if len(best_here) > 1 else None
     if not cust or cust_score < 4:
         return None
     out = []
@@ -1077,10 +1090,15 @@ def _fast_parse(text, customers, items):
                     "rate": _price_for(best["item_code"], cust["name"])})
     if not out:
         return None
-    return {"customer": {"name": cust["name"],
-                         "customer_name": cust["customer_name"]},
-            "customer_phrase": segments[cust_i],
-            "items": out, "unmatched": [], "notes": None}
+    result = {"customer": None if cust_candidates else
+              {"name": cust["name"], "customer_name": cust["customer_name"]},
+              "customer_phrase": segments[cust_i],
+              "items": out, "unmatched": [], "notes": None}
+    if cust_candidates:
+        result["customer_candidates"] = [
+            {"name": c["name"], "customer_name": c["customer_name"]}
+            for c in cust_candidates]
+    return result
 
 
 def _parse_transcript(text):
