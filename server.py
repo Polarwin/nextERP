@@ -815,6 +815,13 @@ def learn_aliases():
     new_items = [i for i in final.get("items", [])
                  if i["item_code"] not in parsed_codes]
 
+    # safety: only learn when exactly ONE parsed line changed — with several
+    # changes, pairing phrase->replacement is guesswork (a wrong alias once
+    # hijacked 香料园 -> 冰白 this way)
+    changed = [p for p in parsed_items if p["item_code"] not in final_codes]
+    if len(changed) > 1:
+        parsed_items = []
+
     for p in parsed_items:
         phrase = (p.get("phrase") or "").strip()
         if not phrase or p["item_code"] in final_codes:
