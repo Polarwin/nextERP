@@ -588,6 +588,9 @@ function renderNewOrder() {
   view.innerHTML = `
     <button class="btn secondary" id="voice-order" style="margin-top:0">🎤 语音下单（客户 + 商品 + 数量）</button>
     <div id="voice-panel" class="card hidden">
+      <div id="prog-wrap" class="hidden" style="margin-bottom:8px">
+        <div class="progress" style="height:8px"><div id="prog-bar" style="width:0%;transition:width .12s linear"></div></div>
+      </div>
       <div id="joke-box" class="hidden" style="text-align:center;color:var(--muted);font-size:14px;padding:6px 0"></div>
       <button class="btn danger" id="voice-record">🎤 按住说话</button>
       <div class="meta" style="text-align:center;margin:6px 0">松开后自动识别并填入表单（需 HTTPS 打开）</div>
@@ -852,9 +855,11 @@ async function startRecording(btn) {
     mediaRec.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
       const blob = new Blob(audioChunks, { type: mediaRec.mimeType || "audio/mp4" });
-      uploadAudio(blob, btn);
+      const durationSec = (Date.now() - recStartTs) / 1000;
+      uploadAudio(blob, btn, durationSec);
     };
     mediaRec.start();
+    recStartTs = Date.now();
     btn.textContent = "🔴 松开结束";
     btn.classList.add("recording");
   } catch (e) {
@@ -870,7 +875,9 @@ function stopRecording(btn) {
   }
 }
 
-async function uploadAudio(blob, btn) {
+async function uploadAudio(blob, btn, durationSec = 5) {
+  // whisper scales with audio length (~0.35x + 1.5s overhead); LLM adds ~15s
+  startProgress(Math.max(2, 1.5 + durationSec * 0.35));
   startJokes();
   try {
     const fd = new FormData();
@@ -883,6 +890,7 @@ async function uploadAudio(blob, btn) {
   } catch (e) {
     toast("识别失败：" + e.message, 5000);
   } finally {
+    stopProgress();
     stopJokes();
     btn.disabled = false;
     btn.textContent = "🎤 按住说话";
@@ -896,6 +904,38 @@ function bindRecordButton() {
   btn.addEventListener("touchend", e => { e.preventDefault(); stopRecording(btn); });
   btn.addEventListener("mousedown", () => startRecording(btn));
   btn.addEventListener("mouseup", () => stopRecording(btn));
+}
+
+/* ---- waiting progress bar (estimate from recording length + LLM time) ---- */
+
+let progTimer = null;
+let recStartTs = 0;
+
+function startProgress(estimateSec) {
+  const wrap = document.getElementById("prog-wrap");
+  const bar = document.getElementById("prog-bar");
+  if (!wrap || !bar) return;
+  wrap.classList.remove("hidden");
+  const t0 = Date.now();
+  clearInterval(progTimer);
+  progTimer = setInterval(() => {
+    const el = (Date.now() - t0) / 1000;
+    // fast path: 0..85% over the estimate; then creep toward 97% (LLM window)
+    const pct = el <= estimateSec
+      ? (el / estimateSec) * 85
+      : Math.min(97, 85 + ((el - estimateSec) / 15) * 12);
+    bar.style.width = pct + "%";
+  }, 100);
+}
+
+function stopProgress() {
+  clearInterval(progTimer);
+  progTimer = null;
+  const wrap = document.getElementById("prog-wrap");
+  const bar = document.getElementById("prog-bar");
+  if (!wrap || !bar) return;
+  bar.style.width = "100%";
+  setTimeout(() => { wrap.classList.add("hidden"); bar.style.width = "0"; }, 400);
 }
 
 /* ---- waiting-room jokes (slow LLM path only) ---- */
@@ -958,6 +998,7 @@ async function parseVoice(btn) {
   if (no) no.voice = { text, parsed: null };  // log attempt even if parse fails
   btn.disabled = true;
   btn.textContent = "解析中…";
+  startProgress(2);  // text path: fast parse ~1s, LLM fallback ~15s
   startJokes();
   try {
     const d = await api("/api/parse_order", {
@@ -968,6 +1009,7 @@ async function parseVoice(btn) {
   } catch (e) {
     toast("解析失败：" + e.message, 5000);
   } finally {
+    stopProgress();
     stopJokes();
     btn.disabled = false;
     btn.textContent = "解析并填入表单";
