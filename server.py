@@ -883,6 +883,24 @@ _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
 _QTY_TAIL = re.compile(
     r"^(.*?)\s*([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
     r"(瓶|箱|盒|个|支|件|听)?$")
+_QTY_LEAD = re.compile(
+    r"^([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
+    r"(瓶|箱|盒|个|支|件|听)(.+)$")
+
+
+def _split_qty(seg):
+    """'(三瓶)天梯园(三瓶)' -> (name, qty); 箱 counts as 12 bottles."""
+    m = _QTY_TAIL.match(seg)
+    if m:
+        n = _cn_int(m.group(2))
+        if n and m.group(1).strip():
+            return m.group(1).strip(), n * 12 if (m.group(3) or "") == "箱" else n
+    m = _QTY_LEAD.match(seg)
+    if m:
+        n = _cn_int(m.group(1))
+        if n:
+            return m.group(3).strip(), n * 12 if m.group(2) == "箱" else n
+    return seg, 1
 
 # too generic to auto-pick — let the LLM handle with an ambiguity note
 _GENERIC_TERMS = {"雷司令", "莫斯卡托", "干白", "干红", "红酒", "葡萄酒",
@@ -992,11 +1010,8 @@ def _prefilter_catalog(text, customers, items, n_cust=50, n_items=60):
     segments = _seg_list(text)
     scored = []
     for seg in segments:
-        # strip the qty tail before alias lookup ("jiji两瓶" -> "jiji" -> GG)
-        name_part = seg
-        m = _QTY_TAIL.match(seg)
-        if m and m.group(1).strip() and _cn_int(m.group(2)) is not None:
-            name_part = m.group(1).strip()
+        # strip qty before alias lookup ("jiji两瓶"/"两瓶jiji" -> "jiji" -> GG)
+        name_part, _qty = _split_qty(seg)
         variants = [name_part]
         alias = _alias_for(name_part)
         if alias:
@@ -1056,13 +1071,7 @@ def _fast_parse(text, customers, items):
     for idx, seg in enumerate(segments):
         if idx == cust_i:
             continue
-        name_part, qty = seg, 1
-        m = _QTY_TAIL.match(seg)
-        if m:
-            n = _cn_int(m.group(2))
-            if n and m.group(1).strip():
-                name_part = m.group(1).strip()
-                qty = n * 12 if (m.group(3) or "") == "箱" else n
+        name_part, qty = _split_qty(seg)
         alias = _alias_for(name_part)
         if alias:
             name_part = alias
