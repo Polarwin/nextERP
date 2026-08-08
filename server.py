@@ -921,6 +921,8 @@ def _seg_list(text):
     """Split a transcript, keeping bare qty tokens ('五瓶', '2') glued to the
     preceding segment ('阿尔巴利诺 五瓶' -> ['一杯','阿尔巴利诺五瓶'])."""
     raw = [s.strip() for s in _SPLIT_RE.split(text) if s.strip()]
+    # spoken orders often prepend 给 to the customer: 给漾叶 -> 漾叶
+    raw = [s[1:] if s.startswith("给") and len(s) > 1 else s for s in raw]
     out = []
     for s in raw:
         m = _QTY_ONLY.match(s)
