@@ -593,6 +593,7 @@ function renderNewOrder() {
       </div>
       <div id="joke-box" class="hidden" style="text-align:center;color:var(--muted);font-size:14px;padding:6px 0"></div>
       <button class="btn danger" id="voice-record">🎤 按住说话</button>
+      <button class="btn secondary ${(no.voice && no.voice.applied) ? "" : "hidden"}" id="voice-redo">🔁 讲错了，重讲（清除上次填入）</button>
       <div class="meta" style="text-align:center;margin:6px 0">松开后自动识别并填入表单（需 HTTPS 打开）</div>
       <textarea id="voice-text" class="search-input" rows="3"
         placeholder="也可以点这里，用键盘自带的 🎤 听写或打字：壹杯，雷司令三瓶，GG两瓶"></textarea>
@@ -651,6 +652,8 @@ function renderNewOrder() {
   };
   document.getElementById("voice-parse").onclick = (e) => parseVoice(e.target);
   bindRecordButton();
+  const redo = document.getElementById("voice-redo");
+  if (redo) redo.onclick = undoVoice;
   loadWarehouses().then(() => {
     const sel = document.getElementById("no-warehouse");
     if (!sel) return;
@@ -703,6 +706,34 @@ function noStepQty(i, d) {
 function noSetQty(i, v) { no.items[i].qty = Math.max(0, parseFloat(v) || 0); renderNoItems(); }
 function noSetRate(i, v) { no.items[i].rate = Math.max(0, parseFloat(v) || 0); renderNoItems(); }
 function noRemove(i) { no.items.splice(i, 1); renderNoItems(); }
+
+function undoVoice() {
+  // revert exactly what the last voice parse applied
+  const applied = no && no.voice && no.voice.applied;
+  if (!applied) return;
+  for (const ai of applied.items) {
+    const ex = no.items.find(x => x.item_code === ai.item_code);
+    if (ex) ex.qty -= ai.qty;
+  }
+  no.items = no.items.filter(x => x.qty > 0);
+  if (applied.customer_set) {
+    no.customer = applied.prev_customer;
+    no.customer_name = applied.prev_customer_name;
+  }
+  if (applied.shipping_set) no.shipping_rule = applied.prev_shipping;
+  if (applied.freight_set) {
+    const ex = no.charges.find(c => c.account_head === "运费 - LTL");
+    if (ex) {
+      if (applied.prev_freight == null)
+        no.charges = no.charges.filter(c => c.account_head !== "运费 - LTL");
+      else ex.tax_amount = applied.prev_freight;
+    }
+  }
+  no.voice.applied = null;
+  no.candidates = null;
+  renderNewOrder();
+  toast("已清除上次填入，重新按住说话即可");
+}
 
 function clearCustomer() {
   no.customer = null; no.customer_name = null;
@@ -1020,7 +1051,15 @@ function applyParsedOrder(d, text) {
   if (!no) return;
   no.voice = { text, parsed: d };  // kept for auto-learning on submit
   no.candidates = null;
+  // track exactly what this parse applied, so 🔁重讲 can undo it cleanly
+  const applied = { items: [], customer_set: false, prev_customer: no.customer,
+                    prev_customer_name: no.customer_name,
+                    shipping_set: false, prev_shipping: no.shipping_rule,
+                    freight_set: false, prev_freight:
+                      (no.charges.find(c => c.account_head === "运费 - LTL") || {}).tax_amount };
+  no.voice.applied = applied;
   if (d.customer) {
+    applied.customer_set = true;
     no.customer = d.customer.name;
     no.customer_name = d.customer.customer_name;
   } else if (d.customer_candidates && d.customer_candidates.length) {
@@ -1034,9 +1073,14 @@ function applyParsedOrder(d, text) {
     if (ex) ex.qty += it.qty;
     else no.items.push({ item_code: it.item_code, item_name: it.item_name,
                          uom: it.uom, qty: it.qty, rate: it.rate });
+    applied.items.push({ item_code: it.item_code, qty: it.qty });
   }
-  if (d.shipping_rule) no.shipping_rule = d.shipping_rule;
+  if (d.shipping_rule) {
+    applied.shipping_set = true;
+    no.shipping_rule = d.shipping_rule;
+  }
   if (d.freight) {
+    applied.freight_set = true;
     const ex = no.charges.find(c => c.account_head === "运费 - LTL");
     if (ex) ex.tax_amount = d.freight;
     else no.charges.push({ account_head: "运费 - LTL", description: "运费",

@@ -1323,7 +1323,7 @@ def _whisper_model():
             if _whisper["model"] is None:
                 from faster_whisper import WhisperModel
                 _whisper["model"] = WhisperModel(
-                    "medium", device="cpu", compute_type="int8")
+                    "small", device="cpu", compute_type="int8")
     return _whisper["model"]
 
 
