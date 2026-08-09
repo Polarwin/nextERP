@@ -916,7 +916,8 @@ _TRAITS = ["gg", "珍藏", "晚摘", "串选", "粒选", "金盖", "tba", "枯�
 # more specific phrases first). Usage stats from recent 200 orders.
 _SHIPPING_ALIASES = [
     (["顺丰航空", "到付"], "顺丰航空特级到付"),
-    (["德邦快递+冰袋隔热膜", "德邦加冰袋隔热膜", "德邦冰袋隔热膜"], "德邦快递+冰袋隔热膜"),
+    (["德邦快递+冰袋隔热膜", "德邦加冰袋隔热膜", "德邦冰袋隔热膜",
+      "冰袋隔热", "冰带隔热"], "德邦快递+冰袋隔热膜"),
     (["德邦+冰袋", "德邦加冰袋", "德邦冰袋"], "德邦+冰袋"),
     (["顺丰+冰袋", "顺丰加冰袋", "顺丰冰袋"], "顺丰+冰袋隔热膜"),
     (["德邦"], "德邦快递"),
@@ -1322,7 +1323,7 @@ def _whisper_model():
             if _whisper["model"] is None:
                 from faster_whisper import WhisperModel
                 _whisper["model"] = WhisperModel(
-                    "small", device="cpu", compute_type="int8")
+                    "medium", device="cpu", compute_type="int8")
     return _whisper["model"]
 
 
