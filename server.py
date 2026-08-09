@@ -1223,8 +1223,10 @@ def _hotwords():
             if "GG" in name:
                 names.append(short + "GG")       # 天梯园GG / 森林园GG
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
+              "灵犀园", "灵犀园晚摘", "金滴园",
               "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
               "herman干白", "赫曼干白",
+              "德邦", "顺丰", "冰袋", "隔热膜", "运费",
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
     cust_names = [c["customer_name"] for c in customers
                   if c.get("customer_name")]
