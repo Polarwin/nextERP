@@ -1035,10 +1035,19 @@ function applyParsedOrder(d, text) {
     else no.items.push({ item_code: it.item_code, item_name: it.item_name,
                          uom: it.uom, qty: it.qty, rate: it.rate });
   }
+  if (d.shipping_rule) no.shipping_rule = d.shipping_rule;
+  if (d.freight) {
+    const ex = no.charges.find(c => c.account_head === "运费 - LTL");
+    if (ex) ex.tax_amount = d.freight;
+    else no.charges.push({ account_head: "运费 - LTL", description: "运费",
+                           tax_amount: d.freight });
+  }
   renderNewOrder();
   const parts = [];
   if (d.customer) parts.push("客户 " + d.customer.customer_name);
   parts.push((d.items || []).length + " 个商品");
+  if (d.shipping_rule) parts.push("物流 " + d.shipping_rule);
+  if (d.freight) parts.push("运费 ¥" + d.freight);
   if (d.unmatched && d.unmatched.length)
     parts.push("未识别：" + d.unmatched.join("、"));
   if (d.notes && d.notes !== "null") parts.push("备注：" + d.notes);

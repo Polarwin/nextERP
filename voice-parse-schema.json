@@ -25,8 +25,17 @@
     "notes": {
       "type": ["string", "null"],
       "description": "不确定或需要用户确认的地方，没有为 null"
+    },
+    "shipping_rule": {
+      "type": ["string", "null"],
+      "description": "物流方式列表中最匹配的一项，没提到为 null"
+    },
+    "freight": {
+      "type": ["number", "null"],
+      "description": "口述的运费金额（元），没提到为 null"
     }
   },
-  "required": ["customer", "customer_phrase", "items", "notes"],
+  "required": ["customer", "customer_phrase", "items", "notes",
+               "shipping_rule", "freight"],
   "additionalProperties": false
 }

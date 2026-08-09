@@ -781,11 +781,13 @@ _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口�
 规则：
 - 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。
 - 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
-- 数量：中文或阿拉伯数字，单位瓶/箱等。一箱=12瓶。没说数量默认1瓶。
+- 数量：中文或阿拉伯数字，单位瓶/箱等，可能在品名前面或后面。一箱=12瓶。没说数量默认1瓶。
 - 年份：未指明年份时选最新年份（如同时有22和25，选25)。
+- 物流方式（shipping_rule)：从口述中匹配物流词，可选值：{shipping}。如"德邦"="德邦快递"、"德邦加冰袋隔热膜"="德邦快递+冰袋隔热膜"、"加冰袋"对应带冰袋的选项。没提到为 null。
+- 运费（freight)：口述中"运费XX元"或单独的"XX元"，输出数字。没提到为 null。
 - 每个商品和客户都要回传口述中的原话片段（phrase / customer_phrase)，用于学习。
 - 只输出 JSON，不要任何其他文字：
-{{"customer": "客户列表中的准确名称或 null", "customer_phrase": "原话或 null", "items": [{{"item_code": "货号", "qty": 数量, "phrase": "原话"}}], "notes": "不确定之处或 null"}}"""
+{{"customer": "客户列表中的准确名称或 null", "customer_phrase": "原话或 null", "items": [{{"item_code": "货号", "qty": 数量, "phrase": "原话"}}], "notes": "不确定之处或 null", "shipping_rule": "物流方式或 null", "freight": 数字或 null}}"""
 
 
 @app.route("/api/learn", methods=["POST"])
@@ -909,6 +911,48 @@ _GENERIC_TERMS = {"雷司令", "莫斯卡托", "干白", "干红", "红酒", "�
 # distinguishing traits of wines sharing a vineyard name
 _TRAITS = ["gg", "珍藏", "晚摘", "串选", "粒选", "金盖", "tba", "枯萄",
            "半甜", "冰白", "老藤", "6号", "一星", "凌岩坡"]
+
+# spoken shipping phrase -> shipping rule (ordered: first match wins;
+# more specific phrases first). Usage stats from recent 200 orders.
+_SHIPPING_ALIASES = [
+    (["顺丰航空", "到付"], "顺丰航空特级到付"),
+    (["德邦快递+冰袋隔热膜", "德邦加冰袋隔热膜", "德邦冰袋隔热膜"], "德邦快递+冰袋隔热膜"),
+    (["德邦+冰袋", "德邦加冰袋", "德邦冰袋"], "德邦+冰袋"),
+    (["顺丰+冰袋", "顺丰加冰袋", "顺丰冰袋"], "顺丰+冰袋隔热膜"),
+    (["德邦"], "德邦快递"),
+    (["顺丰"], "顺丰"),
+    (["融汇", "市内配送"], "融汇市内配送"),
+    (["货拉拉"], "货拉拉"),
+    (["京东"], "京东重货+隔热膜泡沫箱"),
+    (["跑腿"], "跑腿"),
+    (["闪送"], "闪送"),
+    (["自提"], "自提"),
+    (["物流"], "物流"),
+]
+
+_FREIGHT_RE = re.compile(
+    r"^(?:运费([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]{1,4})元?"
+    r"|([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]{1,4})元)$")
+
+
+def _match_shipping(seg):
+    n = _norm(seg)
+    for keywords, rule in _SHIPPING_ALIASES:
+        if any(_norm(k) in n for k in keywords):
+            return rule
+    return None
+
+
+def _match_freight(seg):
+    m = _FREIGHT_RE.match(seg.replace(" ", ""))
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    try:
+        return float(raw)
+    except ValueError:
+        n = _cn_int(raw)
+        return float(n) if n is not None else None
 
 _VOICE_ALIAS_FILE = "voice_aliases.json"
 
@@ -1047,6 +1091,25 @@ def _fast_parse(text, customers, items):
     segments = _seg_list(text)
     if not segments:
         return None
+    # pull shipping rule and freight out of the segment stream first
+    shipping, freight, work = None, None, []
+    for seg in segments:
+        rule = _match_shipping(seg)
+        if rule and shipping is None:
+            shipping = rule
+            continue
+        amt = _match_freight(seg)
+        if amt is not None and freight is None:
+            freight = amt
+            continue
+        work.append(seg)
+    segments = work
+    if not segments:
+        if shipping or freight:
+            return {"customer": None, "customer_phrase": None, "items": [],
+                    "unmatched": [], "notes": None,
+                    "shipping_rule": shipping, "freight": freight}
+        return None
     cust, cust_score, cust_i = None, 0, -1
     cust_candidates = None
     for idx, seg in enumerate(segments):
@@ -1114,7 +1177,8 @@ def _fast_parse(text, customers, items):
     result = {"customer": None if cust_candidates else
               {"name": cust["name"], "customer_name": cust["customer_name"]},
               "customer_phrase": segments[cust_i],
-              "items": out, "unmatched": [], "notes": None}
+              "items": out, "unmatched": [], "notes": None,
+              "shipping_rule": shipping, "freight": freight}
     if cust_candidates:
         result["customer_candidates"] = [
             {"name": c["name"], "customer_name": c["customer_name"]}
@@ -1137,11 +1201,14 @@ def _parse_transcript(text):
 
     customers, items = _prefilter_catalog(text, all_customers, all_items)
 
+    with _cache_lock:
+        ship_rules = [r["name"] for r in _cache["shipping_rules"]]
     prompt = _PARSE_PROMPT.format(
         customers="、".join(c["customer_name"] for c in customers),
         items="；".join(f"{i['item_code']}|{i.get('item_name', '')}"
                         for i in items),
-        learned=_learned_hint())
+        learned=_learned_hint(),
+        shipping="、".join(ship_rules))
     parsed = _llm_parse(prompt, text)
 
     # map LLM output back to real records (full catalog, not just prefiltered)
@@ -1178,6 +1245,16 @@ def _parse_transcript(text):
                                customer["name"] if customer else None),
         })
 
+    ship = parsed.get("shipping_rule")
+    if ship and ship not in ship_rules:
+        # try alias matching if the LLM returned free text
+        ship = _match_shipping(ship)
+    freight = parsed.get("freight")
+    try:
+        freight = float(freight) if freight is not None else None
+    except (TypeError, ValueError):
+        freight = None
+
     return {
         "customer": customer and {"name": customer["name"],
                                   "customer_name": customer["customer_name"]},
@@ -1185,6 +1262,8 @@ def _parse_transcript(text):
         "items": out_items,
         "unmatched": unmatched,
         "notes": parsed.get("notes"),
+        "shipping_rule": ship,
+        "freight": freight,
     }
 
 
