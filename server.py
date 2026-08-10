@@ -1357,6 +1357,11 @@ def _hotwords():
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
     cust_names = [c["customer_name"] for c in customers
                   if c.get("customer_name")]
+    # branch customers (葡道-陆家嘴店 etc.) are said without the dash —
+    # guarantee those spoken forms a hotword slot
+    for c in cust_names:
+        if "-" in c:
+            names.append(c.replace("-", "").replace(" ", ""))
     # frequent customers by recent-order count — these deserve hotword slots
     from collections import Counter
     with _cache_lock:
