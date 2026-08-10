@@ -27,3 +27,4 @@ certs/
 # company website lives on the "www" branch; local untracked copy is the
 # live deployment (symlinked from /srv/www/lucia)
 site/
+voice_log.jsonl

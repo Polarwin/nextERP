@@ -867,17 +867,48 @@ def learn_aliases():
     return jsonify({"learned": learned})
 
 
+# ------------------------------------------------------- voice parse logging
+# Set False later, when the pipeline is trusted. Logs every parse to
+# voice_log.jsonl for review/learning analysis.
+DEBUG_VOICE = True
+VOICE_LOG = "voice_log.jsonl"
+
+
+def _vlog(entry):
+    if not DEBUG_VOICE:
+        return
+    try:
+        with open(VOICE_LOG, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 @app.route("/api/parse_order", methods=["POST"])
 def parse_order():
     """Parse a dictated order via Kimi into customer + items (with prices)."""
     text = (request.get_json(force=True).get("text") or "").strip()
     if not text:
         return jsonify({"error": "text required"}), 400
+    import time
+    t0 = time.time()
     try:
-        return jsonify(_parse_transcript(text))
+        result = _parse_transcript(text)
+        _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "src": "text", "text": text, "path": result.get("_path"),
+               "ms": round((time.time() - t0) * 1000),
+               "customer": (result.get("customer") or {}).get("customer_name"),
+               "items": [[i["item_code"], i["qty"]] for i in result.get("items", [])],
+               "shipping": result.get("shipping_rule"),
+               "freight": result.get("freight")})
+        return jsonify(result)
     except (RuntimeError, ValueError) as e:
+        _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "src": "text", "text": text, "error": str(e)[:200]})
         return jsonify({"error": f"解析服务不可用:{e}"}), 502
     except Exception as e:  # noqa: BLE001 - e.g. subprocess timeout
+        _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "src": "text", "text": text, "error": str(e)[:200]})
         return jsonify({"error": f"解析超时或失败:{e}"}), 502
 
 
@@ -1203,6 +1234,7 @@ def _parse_transcript(text):
 
     fast = _fast_parse(text, all_customers, all_items)
     if fast is not None:
+        fast["_path"] = "fast"
         return fast
 
     customers, items = _prefilter_catalog(text, all_customers, all_items)
@@ -1270,6 +1302,7 @@ def _parse_transcript(text):
         "notes": parsed.get("notes"),
         "shipping_rule": ship,
         "freight": freight,
+        "_path": "llm",
     }
 
 
@@ -1368,17 +1401,32 @@ def parse_audio():
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         f.save(tmp.name)
     try:
+        import time
+        t0 = time.time()
         segments, _ = _whisper_model().transcribe(
             tmp.name, language="zh", beam_size=1, vad_filter=True,
             hotwords=_hotwords(),
             initial_prompt="葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。")
         text = "".join(s.text for s in segments).strip()
+        t_asr = time.time()
         if not text:
-            _save_recording(tmp.name, suffix, "")
+            dest = _save_recording(tmp.name, suffix, "")
+            _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                   "src": "audio", "file": os.path.basename(dest),
+                   "error": "empty transcript"})
             return jsonify({"error": "没听清，请再试一次"}), 422
         result = _parse_transcript(text)
         result["text"] = text
-        _save_recording(tmp.name, suffix, text)
+        dest = _save_recording(tmp.name, suffix, text)
+        _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+               "src": "audio", "file": os.path.basename(dest), "text": text,
+               "path": result.get("_path"),
+               "asr_ms": round((t_asr - t0) * 1000),
+               "ms": round((time.time() - t0) * 1000),
+               "customer": (result.get("customer") or {}).get("customer_name"),
+               "items": [[i["item_code"], i["qty"]] for i in result.get("items", [])],
+               "shipping": result.get("shipping_rule"),
+               "freight": result.get("freight")})
         return jsonify(result)
     except (RuntimeError, ValueError) as e:
         _save_recording(tmp.name, suffix, f"[error] {e}")
