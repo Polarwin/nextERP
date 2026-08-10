@@ -85,7 +85,8 @@ CACHE_DIR = "cache"
 CACHE_TTL = 30 * 60
 
 _cache = {"customers": [], "items": [], "warehouses": [],
-          "customer_groups": [], "territories": [], "shipping_rules": []}
+          "customer_groups": [], "territories": [], "shipping_rules": [],
+          "recent_orders": []}
 _cache_lock = threading.Lock()
 _cache_state = {"updated_at": None, "error": None}
 
@@ -137,6 +138,14 @@ CACHE_SPECS = {
         "path": "/api/resource/Shipping Rule",
         "params": {
             "fields": json.dumps(["name", "label"]),
+            "limit_page_length": 500,
+        },
+    },
+    "recent_orders": {
+        "path": "/api/resource/Sales Order",
+        "params": {
+            "fields": json.dumps(["customer"]),
+            "order_by": "creation desc",
             "limit_page_length": 500,
         },
     },
@@ -1348,11 +1357,17 @@ def _hotwords():
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
     cust_names = [c["customer_name"] for c in customers
                   if c.get("customer_name")]
+    # frequent customers by recent-order count — these deserve hotword slots
+    from collections import Counter
+    with _cache_lock:
+        recent = list(_cache["recent_orders"])
+    freq = Counter(o.get("customer") for o in recent if o.get("customer"))
+    hot_custs = [c for c, _ in freq.most_common(30)]
     # whisper only keeps the END of a long prompt (~few hundred chars), so
-    # order by importance: codes & customers first (may be dropped), the
-    # spoken short forms last (always survive)
+    # order by importance: codes & cold customers first (may be dropped),
+    # item short names, and hot customers + spoken short forms last
     names = list(dict.fromkeys(names))           # dedupe, keep order
-    return "，".join(codes + cust_names + names)[-1600:]
+    return "，".join(codes + cust_names + names + hot_custs)[-1600:]
 
 
 def _whisper_model():
