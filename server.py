@@ -844,6 +844,9 @@ def learn_aliases():
         phrase = (p.get("phrase") or "").strip()
         if not phrase or p["item_code"] in final_codes:
             continue  # kept as parsed — nothing to learn
+        phrase, _pq = _split_qty(phrase)  # learn the name, not "8瓶灵犀园"
+        if not phrase:
+            continue
         # find the replacement: unique new item, or same-qty match
         cands = new_items
         if len(cands) != 1:
@@ -1192,6 +1195,8 @@ def _parse_transcript(text):
     Fast local parse first; LLM (kimi/codex CLI) only for hard cases."""
     # whisper mishears 五瓶 as 物品 (wǔpíng/wùpǐn); the app never uses 物品
     text = text.replace("物品", "五瓶")
+    # and 瓶 as 平/坪 after a number ("8平" -> "8瓶", "两坪" -> "两瓶")
+    text = re.sub(r"([0-9零一二两三四五六七八九十])\s*[平坪]", r"\1瓶", text)
     with _cache_lock:
         all_customers = list(_cache["customers"])
         all_items = list(_cache["items"])
@@ -1303,7 +1308,7 @@ def _hotwords():
             if "GG" in name:
                 names.append(short + "GG")       # 天梯园GG / 森林园GG
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
-              "灵犀园", "灵犀园晚摘", "金滴园", "云岭干红", "云岭",
+              "灵犀园", "灵犀园晚摘", "金滴园", "云岭干红", "云岭", "涅墨园",
               "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
               "herman干白", "赫曼干白",
               "德邦", "顺丰", "冰袋", "隔热膜", "运费",
