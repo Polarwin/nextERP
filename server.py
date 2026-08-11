@@ -1071,8 +1071,28 @@ def _vintage(row):
     return int(m.group(0)) if m else 0
 
 
+def _lcs_len(a, b):
+    """Length of the longest common substring of a and b."""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    best = 0
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        ai = a[i - 1]
+        for j in range(1, len(b) + 1):
+            if ai == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                if cur[j] > best:
+                    best = cur[j]
+        prev = cur
+    return best
+
+
 def _relevance(seg_n, seg_py, row, name_field):
-    """Quick relevance of a transcript segment to a catalog row."""
+    """Quick relevance of a transcript segment to a catalog row.
+    Substring matches score highest; longest-common-substring on hanzi and
+    pinyin absorbs ASR drift (幻影干魂葡道酒 ≈ 幻影干红葡萄酒)."""
     name_n = _norm(row.get(name_field))
     py = row.get("_py", "")
     ini = row.get("_ini", "")
@@ -1081,15 +1101,15 @@ def _relevance(seg_n, seg_py, row, name_field):
     score = 0.0
     if seg_n in name_n:
         score = len(seg_n) * 2.0
-    elif len(seg_n) >= 2 and any(
-            name_n.startswith(seg_n[:i]) or seg_n[:i] in name_n
-            for i in range(len(seg_n), 1, -1)):
-        score = 2.0
+    else:
+        score = _lcs_len(seg_n, name_n) * 1.0
     if seg_py:
         if seg_py in py:
             score = max(score, len(seg_py) * 1.5)
         elif len(seg_py) >= 2 and seg_py in ini:
             score = max(score, len(seg_py))
+        else:
+            score = max(score, _lcs_len(seg_py, py) * 0.9)
     return score
 
 
