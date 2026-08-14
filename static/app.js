@@ -768,21 +768,38 @@ function bindSearch(inputId, resultsId, urlPrefix, renderHits) {
   const inp = document.getElementById(inputId);
   const box = document.getElementById(resultsId);
   if (!inp || !box) return;
-  inp.oninput = () => {
+  const search = () => {
     clearTimeout(searchTimers[inputId]);
     const q = inp.value.trim();
     searchTimers[inputId] = setTimeout(async () => {
       try {
         const rows = await api(urlPrefix + encodeURIComponent(q));
         box.innerHTML = renderHits(rows);
+        box.querySelectorAll("[data-customer-index]").forEach(hit => {
+          hit.onclick = () => {
+            const c = rows[Number(hit.dataset.customerIndex)];
+            if (c) pickCustomer(c.name, c.customer_name);
+          };
+        });
+        box.querySelectorAll("[data-item-index]").forEach(hit => {
+          hit.onclick = () => {
+            const it = rows[Number(hit.dataset.itemIndex)];
+            if (it) pickItem(it.item_code);
+          };
+        });
       } catch (e) { box.innerHTML = ""; }
     }, 250);
+  };
+  inp.oninput = search;
+  // Show initial choices on mobile when the user taps the empty field.
+  inp.onfocus = () => {
+    if (!box.children.length) search();
   };
 }
 
 function renderCustomerHits(rows) {
-  return rows.map(c => `
-    <div class="hit" onclick="pickCustomer('${esc(c.name)}','${esc(c.customer_name)}')">
+  return rows.map((c, i) => `
+    <div class="hit" data-customer-index="${i}">
       ${esc(c.customer_name)}</div>`).join("");
 }
 
@@ -794,8 +811,8 @@ function pickCustomer(name, display) {
 }
 
 function renderItemHits(rows) {
-  return rows.map(it => `
-    <div class="hit" onclick='pickItem(${JSON.stringify(it.item_code)})'>
+  return rows.map((it, i) => `
+    <div class="hit" data-item-index="${i}">
       <b>${esc(it.item_code)}</b> ${esc(it.item_name)}</div>`).join("");
 }
 
