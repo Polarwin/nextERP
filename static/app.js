@@ -289,7 +289,7 @@ async function renderOrderDetail(name) {
       <button class="btn secondary" onclick="openPdf('Sales Order','${esc(o.name)}')">🖨 打印订单 PDF</button>
       <button class="btn secondary" onclick='sharePdf("Sales Order", ${jsq(o.name)}, this, ${jsq(o.customer_name)})'>📤 分享订单 PDF（微信）</button>
       ${draft
-        ? `<button class="btn danger" id="submit-so">✅ 提交订单并打印 PDF</button>` : ""}
+        ? `<button class="btn danger" id="submit-so">✅ 提交订单</button>` : ""}
       ${o.docstatus === 1 && !["Completed", "Closed", "Cancelled"].includes(o.status)
         ? `<div id="delivery-meta" class="card">
              <div class="loading">加载送货地址和联系人…</div>
@@ -415,12 +415,11 @@ async function submitOrder(name, btn) {
     });
     await api(`/api/orders/${encodeURIComponent(name)}/submit`, { method: "POST" });
     toast(`订单 ${name} 已提交`);
-    openPdf("Sales Order", name);
     renderOrderDetail(name);
   } catch (e) {
     toast("提交失败：" + e.message, 5000);
     btn.disabled = false;
-    btn.textContent = "✅ 提交订单并打印 PDF";
+    btn.textContent = "✅ 提交订单";
   }
 }
 
@@ -494,7 +493,7 @@ async function renderDeliveries() {
         </div>
         <div class="row meta">
           <span class="name">${esc(d.name)}</span>
-          <span>${esc(d.posting_date)} · ${money(d.grand_total)}</span>
+          <span>${esc(d.posting_date)}</span>
         </div>
       </div>`).join("");
   } catch (e) {
@@ -529,13 +528,13 @@ async function renderDeliveryDetail(name) {
       <div class="card detail-head">
         <div class="row"><span class="customer">${esc(d.customer_name)}</span>${statusBadge(d.status, d.docstatus)}</div>
         <div class="kv"><span>日期</span><b>${esc(d.posting_date)}</b></div>
-        <div class="kv"><span>金额</span><b>${money(d.grand_total)}</b></div>
       </div>
       <div class="section-title">明细${draft ? "（可编辑数量）" : ""}</div>
       <div class="card">${items || '<div class="empty">无明细</div>'}</div>
       ${draft ? `
         <button class="btn secondary" id="save-draft">💾 保存草稿</button>
-        <button class="btn danger" id="submit-print">✅ 提交出货并打印 PDF（扣库存）</button>
+        <button class="btn danger" id="submit-dn">✅ 提交出货（扣库存）</button>
+        <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
       ` : `
         <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
         <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF（微信）</button>
@@ -544,7 +543,7 @@ async function renderDeliveryDetail(name) {
     window._dn = d;
     if (draft) {
       document.getElementById("save-draft").onclick = () => saveDraft(d.name);
-      document.getElementById("submit-print").onclick = () => submitAndPrint(d.name);
+      document.getElementById("submit-dn").onclick = () => submitDelivery(d.name);
       loadWarehouses().then(() => {
         document.querySelectorAll(".wh-select").forEach(sel => {
           const i = Number(sel.dataset.idx);
@@ -583,9 +582,9 @@ async function saveDraft(name) {
   }
 }
 
-async function submitAndPrint(name) {
-  if (!confirm("提交出货单将扣减库存，确定提交并打印？")) return;
-  const btn = document.getElementById("submit-print");
+async function submitDelivery(name) {
+  if (!confirm("提交出货单将扣减库存，确定提交？")) return;
+  const btn = document.getElementById("submit-dn");
   btn.disabled = true;
   btn.textContent = "提交中…";
   try {
@@ -595,12 +594,11 @@ async function submitAndPrint(name) {
     });
     await api(`/api/deliveries/${encodeURIComponent(name)}/submit`, { method: "POST" });
     toast("已提交，库存已扣减");
-    openPdf("Delivery Note", name);
     renderDeliveryDetail(name);
   } catch (e) {
     toast("提交失败：" + e.message, 5000);
     btn.disabled = false;
-    btn.textContent = "✅ 提交出货并打印 PDF（扣库存）";
+    btn.textContent = "✅ 提交出货（扣库存）";
   }
 }
 

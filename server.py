@@ -1512,7 +1512,7 @@ def parse_audio():
 def deliveries():
     r = erp.call("GET", "/api/resource/Delivery Note", params={
         "fields": json.dumps(["name", "customer_name", "posting_date",
-                              "status", "docstatus", "grand_total"]),
+                              "status", "docstatus"]),
         "order_by": "posting_date desc",
         "limit_page_length": 100,
     })
