@@ -535,9 +535,10 @@ async function renderDeliveryDetail(name) {
         <button class="btn secondary" id="save-draft">💾 保存草稿</button>
         <button class="btn danger" id="submit-dn">✅ 提交出货（扣库存）</button>
         <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
+        <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF 文件（微信）</button>
       ` : `
         <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
-        <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF（微信）</button>
+        <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF 文件（微信）</button>
       `}
     `;
     window._dn = d;
