@@ -666,6 +666,38 @@ def update_order(name):
     return jsonify(body.get("data", body) if code == 200 else body), code
 
 
+@app.route("/api/customer_delivery_meta")
+def customer_delivery_meta():
+    """Addresses and contacts linked to a Customer for Delivery Note setup."""
+    customer = (request.args.get("customer") or "").strip()
+    if not customer:
+        return jsonify({"error": "customer required"}), 400
+    link_filters = [["Dynamic Link", "link_doctype", "=", "Customer"],
+                    ["Dynamic Link", "link_name", "=", customer]]
+    address_r = erp.call("GET", "/api/resource/Address", params={
+        "fields": json.dumps(["name", "address_title", "address_type",
+                              "address_line1", "city", "is_shipping_address"]),
+        "filters": json.dumps(link_filters + [["disabled", "=", 0]]),
+        "order_by": "is_shipping_address desc",
+        "limit_page_length": 100,
+    })
+    address_body, address_code = erp_json(address_r)
+    if address_code != 200:
+        return jsonify(address_body), address_code
+    contact_r = erp.call("GET", "/api/resource/Contact", params={
+        "fields": json.dumps(["name", "first_name", "last_name",
+                              "is_primary_contact", "mobile_no", "email_id"]),
+        "filters": json.dumps(link_filters),
+        "order_by": "is_primary_contact desc",
+        "limit_page_length": 100,
+    })
+    contact_body, contact_code = erp_json(contact_r)
+    if contact_code != 200:
+        return jsonify(contact_body), contact_code
+    return jsonify({"addresses": address_body.get("data", []),
+                    "contacts": contact_body.get("data", [])})
+
+
 def _price_for(item_code, customer):
     """Default selling rate (mirrors /api/item_price logic).
     Network hiccups to the ERP must not fail the whole parse -> rate 0."""
@@ -1497,6 +1529,7 @@ def delivery_detail(name):
 
 @app.route("/api/orders/<path:name>/make_delivery", methods=["POST"])
 def make_delivery(name):
+    payload = request.get_json(silent=True) or {}
     r = erp.call("POST",
                  "/api/method/erpnext.selling.doctype.sales_order"
                  ".sales_order.make_delivery_note",
@@ -1505,6 +1538,10 @@ def make_delivery(name):
     if code != 200:
         return jsonify(body), code
     doc = body["message"]
+    if payload.get("shipping_address_name"):
+        doc["shipping_address_name"] = payload["shipping_address_name"]
+    if payload.get("contact_person"):
+        doc["contact_person"] = payload["contact_person"]
     r2 = erp.call("POST", "/api/resource/Delivery Note", json=doc)
     body2, code2 = erp_json(r2)
     return jsonify(body2.get("data", body2) if code2 == 200 else body2), code2

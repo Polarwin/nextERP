@@ -291,7 +291,10 @@ async function renderOrderDetail(name) {
       ${draft
         ? `<button class="btn danger" id="submit-so">✅ 提交订单并打印 PDF</button>` : ""}
       ${o.docstatus === 1 && !["Completed", "Closed", "Cancelled"].includes(o.status)
-        ? `<button class="btn danger" id="mkdn">🚚 创建出货单</button>` : ""}
+        ? `<div id="delivery-meta" class="card">
+             <div class="loading">加载送货地址和联系人…</div>
+           </div>
+           <button class="btn danger" id="mkdn">🚚 创建出货单</button>` : ""}
     `;
     window._order = o;
     loadOrderMeta().then(() => {
@@ -307,7 +310,10 @@ async function renderOrderDetail(name) {
       }
     });
     const mk = document.getElementById("mkdn");
-    if (mk) mk.onclick = () => makeDelivery(o.name, mk);
+    if (mk) {
+      loadDeliveryMeta(o.customer, o.shipping_address_name, o.contact_person);
+      mk.onclick = () => makeDelivery(o.name, mk);
+    }
     const sub = document.getElementById("submit-so");
     if (sub) sub.onclick = () => submitOrder(o.name, sub);
     const save = document.getElementById("save-so-charges");
@@ -418,11 +424,48 @@ async function submitOrder(name, btn) {
   }
 }
 
+async function loadDeliveryMeta(customer, selectedAddress, selectedContact) {
+  const box = document.getElementById("delivery-meta");
+  if (!box) return;
+  try {
+    const meta = await api(`/api/customer_delivery_meta?customer=${encodeURIComponent(customer)}`);
+    const addressLabel = a => [a.address_title || a.name, a.address_line1, a.city]
+      .filter(Boolean).join(" · ");
+    const contactLabel = c => [
+      [c.first_name, c.last_name].filter(Boolean).join(" ") || c.name,
+      c.mobile_no || c.email_id,
+    ].filter(Boolean).join(" · ");
+    box.innerHTML = `
+      <div class="section-title" style="margin-top:0">送货地址</div>
+      <select id="dn-address" class="search-input">
+        <option value="">使用 ERPNext 默认地址</option>
+        ${(meta.addresses || []).map(a => `<option value="${esc(a.name)}"
+          ${a.name === selectedAddress ? "selected" : ""}>${esc(addressLabel(a))}</option>`).join("")}
+      </select>
+      <div class="section-title">联系人</div>
+      <select id="dn-contact" class="search-input">
+        <option value="">使用 ERPNext 默认联系人</option>
+        ${(meta.contacts || []).map(c => `<option value="${esc(c.name)}"
+          ${c.name === selectedContact ? "selected" : ""}>${esc(contactLabel(c))}</option>`).join("")}
+      </select>`;
+  } catch (e) {
+    box.innerHTML = `<div class="empty">地址/联系人加载失败：${esc(e.message)}</div>`;
+  }
+}
+
 async function makeDelivery(orderName, btn) {
   btn.disabled = true;
   btn.textContent = "创建中…";
   try {
-    const dn = await api(`/api/orders/${encodeURIComponent(orderName)}/make_delivery`, { method: "POST" });
+    const address = document.getElementById("dn-address");
+    const contact = document.getElementById("dn-contact");
+    const dn = await api(`/api/orders/${encodeURIComponent(orderName)}/make_delivery`, {
+      method: "POST",
+      body: JSON.stringify({
+        shipping_address_name: address ? address.value : "",
+        contact_person: contact ? contact.value : "",
+      }),
+    });
     toast(`已创建出货单 ${dn.name}`);
     document.querySelector('[data-tab="deliveries"]').classList.add("active");
     stack = [];
@@ -636,14 +679,16 @@ function renderNewOrder() {
     <div class="card" id="no-charges"></div>
     <div class="card"><div class="row"><b>合计</b><b id="no-total">¥0</b></div></div>
     <button class="btn secondary" id="no-save">💾 保存草稿</button>
-    <button class="btn danger" id="no-submit">✅ 提交订单并打印 PDF</button>
+    <button class="btn danger" id="no-submit">✅ 提交订单</button>
+    <button class="btn secondary" id="no-print">🖨 打印 PDF</button>
   `;
   renderNoItems();
   bindSearch("cust-q", "cust-results", "/api/customers?q=", renderCustomerHits);
   bindSearch("item-q", "item-results", "/api/items?q=", renderItemHits);
   document.getElementById("no-date").onchange = e => { no.delivery_date = e.target.value; };
   document.getElementById("no-save").onclick = () => saveNewOrder(false);
-  document.getElementById("no-submit").onclick = () => saveNewOrder(true);
+  document.getElementById("no-submit").onclick = () => saveNewOrder(true, false);
+  document.getElementById("no-print").onclick = () => saveNewOrder(false, true);
   document.getElementById("voice-order").onclick = () => {
     const p = document.getElementById("voice-panel");
     p.classList.toggle("hidden");
@@ -816,29 +861,53 @@ function renderItemHits(rows) {
       <b>${esc(it.item_code)}</b> ${esc(it.item_name)}</div>`).join("");
 }
 
+const pendingItems = new Set();
+
 async function pickItem(code) {
+  // Pricing and catalogue lookups can be slow. Ignore a repeated mobile tap
+  // until the first lookup has produced its row.
+  if (pendingItems.has(code)) return;
   const existing = no.items.find(it => it.item_code === code);
-  if (existing) { existing.qty += 1; renderNoItems(); return; }
-  let info = { rate: 0 };
-  try {
-    info = await api(`/api/item_price?item_code=${encodeURIComponent(code)}`
-      + (no.customer ? `&customer=${encodeURIComponent(no.customer)}` : ""));
-  } catch (e) { /* keep rate 0 */ }
-  // fetch display name/uom from last search results
-  const hits = await api(`/api/items?q=${encodeURIComponent(code)}`);
-  const it = hits.find(h => h.item_code === code) || { item_code: code, item_name: code };
-  no.items.push({ item_code: code, item_name: it.item_name,
-                  uom: it.stock_uom, qty: 1, rate: info.rate || 0 });
+  if (existing) {
+    // Selecting an item already on the order means adding a separate
+    // promotional/free row (for example: buy 12, get 1 free). ERPNext
+    // supports duplicate item rows, and keeping it separate lets the user
+    // change the free quantity without affecting the paid row.
+    no.items.push({ item_code: existing.item_code,
+                    item_name: existing.item_name,
+                    uom: existing.uom, qty: 1, rate: 0 });
+    document.getElementById("item-q").value = "";
+    document.getElementById("item-results").innerHTML = "";
+    renderNoItems();
+    toast("已添加赠品行，单价为 ¥0");
+    return;
+  }
+  pendingItems.add(code);
   document.getElementById("item-q").value = "";
   document.getElementById("item-results").innerHTML = "";
-  renderNoItems();
+  try {
+    let info = { rate: 0 };
+    try {
+      info = await api(`/api/item_price?item_code=${encodeURIComponent(code)}`
+        + (no.customer ? `&customer=${encodeURIComponent(no.customer)}` : ""));
+    } catch (e) { /* keep rate 0 */ }
+    // fetch display name/uom from the catalogue
+    const hits = await api(`/api/items?q=${encodeURIComponent(code)}`);
+    const it = hits.find(h => h.item_code === code) || { item_code: code, item_name: code };
+    no.items.push({ item_code: code, item_name: it.item_name,
+                    uom: it.stock_uom, qty: 1, rate: info.rate || 0 });
+    renderNoItems();
+  } finally {
+    pendingItems.delete(code);
+  }
 }
 
-async function saveNewOrder(submit) {
+async function saveNewOrder(submit, printPdf = false) {
   if (!no.customer) { toast("请先选择客户"); return; }
   const items = no.items.filter(it => it.qty > 0);
   if (!items.length) { toast("请添加至少一个商品"); return; }
-  const btn = document.getElementById(submit ? "no-submit" : "no-save");
+  const btn = document.getElementById(
+    printPdf ? "no-print" : (submit ? "no-submit" : "no-save"));
   btn.disabled = true;
   try {
     const o = await api("/api/orders", {
@@ -853,7 +922,9 @@ async function saveNewOrder(submit) {
         submit,
       }),
     });
-    toast(submit ? `订单 ${o.name} 已提交` : `订单 ${o.name} 已保存为草稿`);
+    toast(submit ? `订单 ${o.name} 已提交`
+      : printPdf ? `订单 ${o.name} 已保存为草稿并打开 PDF`
+        : `订单 ${o.name} 已保存为草稿`);
     // auto-learn: diff the voice-parsed draft against what was submitted
     if (no.voice) {
       api("/api/learn", {
@@ -873,7 +944,7 @@ async function saveNewOrder(submit) {
       }).catch(() => {});
     }
     no = null;
-    if (submit) openPdf("Sales Order", o.name);
+    if (printPdf) openPdf("Sales Order", o.name);
     stack = [];
     push(renderOrderDetail, o.name);
   } catch (e) {

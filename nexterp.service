@@ -1,0 +1,20 @@
+[Unit]
+Description=nextERP mobile app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=justin
+Group=justin
+WorkingDirectory=/home/justin/Projects/nextERP
+Environment=PORT=8347
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/justin/.kimi-code/bin:/home/justin/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/justin/Projects/nextERP/bin/python /home/justin/Projects/nextERP/server.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
