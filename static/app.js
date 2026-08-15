@@ -432,7 +432,7 @@ async function loadDeliveryMeta(customer, selectedAddress, selectedContact) {
       .filter(Boolean).join(" · ");
     const contactLabel = c => [
       [c.first_name, c.last_name].filter(Boolean).join(" ") || c.name,
-      c.mobile_no || c.email_id,
+      c.mobile_no || c.phone || c.email_id,
     ].filter(Boolean).join(" · ");
     box.innerHTML = `
       <div class="section-title" style="margin-top:0">送货地址</div>

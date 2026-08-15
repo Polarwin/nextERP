@@ -686,7 +686,8 @@ def customer_delivery_meta():
         return jsonify(address_body), address_code
     contact_r = erp.call("GET", "/api/resource/Contact", params={
         "fields": json.dumps(["name", "first_name", "last_name",
-                              "is_primary_contact", "mobile_no", "email_id"]),
+                              "is_primary_contact", "mobile_no", "phone",
+                              "email_id"]),
         "filters": json.dumps(link_filters),
         "order_by": "is_primary_contact desc",
         "limit_page_length": 100,
@@ -1541,7 +1542,29 @@ def make_delivery(name):
     if payload.get("shipping_address_name"):
         doc["shipping_address_name"] = payload["shipping_address_name"]
     if payload.get("contact_person"):
-        doc["contact_person"] = payload["contact_person"]
+        contact_name = payload["contact_person"]
+        # Mapping the Sales Order has already populated its old dependent
+        # contact fields. Resolve the newly selected Customer-linked Contact
+        # and explicitly refresh the phone used by the print format.
+        contact_r = erp.call("GET", "/api/resource/Contact", params={
+            "fields": json.dumps(["name", "mobile_no", "phone"]),
+            "filters": json.dumps([
+                ["name", "=", contact_name],
+                ["Dynamic Link", "link_doctype", "=", "Customer"],
+                ["Dynamic Link", "link_name", "=", doc.get("customer")],
+            ]),
+            "limit_page_length": 1,
+        })
+        contact_body, contact_code = erp_json(contact_r)
+        if contact_code != 200:
+            return jsonify(contact_body), contact_code
+        contacts = contact_body.get("data", [])
+        if not contacts:
+            return jsonify({"error": "联系人不属于这个客户"}), 400
+        contact = contacts[0]
+        doc["contact_person"] = contact["name"]
+        doc["contact_mobile"] = contact.get("mobile_no") or \
+            contact.get("phone") or ""
     r2 = erp.call("POST", "/api/resource/Delivery Note", json=doc)
     body2, code2 = erp_json(r2)
     return jsonify(body2.get("data", body2) if code2 == 200 else body2), code2
