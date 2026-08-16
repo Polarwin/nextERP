@@ -1,8 +1,10 @@
 # nextERP mobile app
 
 Mobile-first web app for the user's ERPNext/Frappe instance （销售订单 Sales
-Order, 销售出货 Delivery Note, PDF printing). Run: `bin/python server.py`,
-open `http://<LAN-IP>:8347` directly, or via nginx at
+Order, 销售出货 Delivery Note, PDF printing). Runs as a systemd service
+(`nexterp.service`, installed by `install-systemd.sh` — also handles
+transitioning a manually-started instance off port 8347); for manual runs:
+`bin/python server.py`. Open `http://<LAN-IP>:8347` directly, or via nginx at
 `http://192.168.0.9/luciatrading/` (config: `nginx-luciatrading.conf`, installed
 to `/etc/nginx/sites-available/luciatrading`). Frontend uses relative paths so
 it works under the `/luciatrading/` prefix and standalone.
@@ -74,6 +76,6 @@ it works under the `/luciatrading/` prefix and standalone.
   stale cache is served if refresh fails.
 - Print formats: `Lucia2` (Sales Order), `销售出货` (Delivery Note).
 - Stock is deducted by ERPNext on Delivery Note **submit** (not on print) —
-  the app couples them in one "提交出货并打印" action.
+  submit ("提交出货（扣库存）") and print are separate buttons since 2026-08-15.
 - Careful with tests: never submit real Delivery Notes / Sales Orders except
   in a create → cancel → delete cleanup cycle.
