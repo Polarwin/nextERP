@@ -152,9 +152,11 @@ def recent_test_cases(orders_file="/tmp/last20_orders.json"):
                 break
             qty = int(row["qty"])
             clauses.append(f"{qty}瓶{item_spoken}")
-            # any vintage sharing this spoken name is acceptable
-            acceptable = spoken_to_codes.get(item_spoken, [code])
-            expected.append({"codes": acceptable, "qty": qty})
+            # When vintages share a spoken name, production must choose newest.
+            shared = spoken_to_codes.get(item_spoken, [code])
+            newest = max(shared, key=lambda candidate: server._vintage(
+                items.get(candidate, {"item_code": candidate})))
+            expected.append({"codes": [newest], "qty": qty})
         if skip or not clauses:
             continue
         sentence = f"{cust_spoken}要" + "，".join(clauses)
@@ -162,7 +164,7 @@ def recent_test_cases(orders_file="/tmp/last20_orders.json"):
             "suite": "recent",
             "order": order["name"],
             "dictionary_customer_id": order["customer"],
-            "expected_customer_id": order["customer"],
+            "expected_customer_id": expected_customer_id(cust_spoken),
             "spoken_name": cust_spoken,
             "wine_name": "+".join(e["codes"][0] for e in expected),
             "expected_item_code": expected[0]["codes"][0],
@@ -223,6 +225,9 @@ def item_test_cases(limit=None):
     Several vintages can share a spoken name; any of them is correct.
     """
     anchor_spoken, anchor_id = ITEM_SUITE_CUSTOMER
+    with server._cache_lock:
+        items_by_code = {it["item_code"]: it
+                         for it in server._cache["items"]}
     cases = []
     for index, (spoken, codes) in enumerate(sorted(item_spoken_names().items())):
         qty, qty_spoken = QUANTITIES[index % len(QUANTITIES)]
@@ -234,7 +239,9 @@ def item_test_cases(limit=None):
             "spoken_name": spoken,
             "wine_name": spoken,
             "expected_item_code": codes[0],
-            "expected_item_codes": codes,
+            "expected_item_codes": [max(
+                codes, key=lambda code: server._vintage(
+                    items_by_code.get(code, {"item_code": code})))],
             "quantity": qty,
             "sentence": sentence,
         })

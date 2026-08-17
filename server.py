@@ -147,7 +147,7 @@ CACHE_SPECS = {
         "params": {
             "fields": json.dumps(["customer"]),
             "order_by": "creation desc",
-            "limit_page_length": 500,
+            "limit_page_length": 5000,
         },
     },
 }
@@ -239,9 +239,26 @@ def load_cache_from_disk():
 
 def refresh_cache():
     for kind, spec in CACHE_SPECS.items():
-        r = erp.call("GET", spec["path"], params=spec["params"])
-        r.raise_for_status()
-        rows = _annotate(kind, r.json().get("data", []))
+        if kind == "recent_orders":
+            # Recency is a customer-ID tie-breaker, so a fixed recent window
+            # is insufficient: two old IDs could both fall outside it. Fetch
+            # every lightweight {customer} row, newest first, in pages.
+            rows, start = [], 0
+            page_length = spec["params"]["limit_page_length"]
+            while True:
+                params = dict(spec["params"], limit_start=start)
+                r = erp.call("GET", spec["path"], params=params)
+                r.raise_for_status()
+                page = r.json().get("data", [])
+                rows.extend(page)
+                if len(page) < page_length:
+                    break
+                start += len(page)
+        else:
+            r = erp.call("GET", spec["path"], params=spec["params"])
+            r.raise_for_status()
+            rows = r.json().get("data", [])
+        rows = _annotate(kind, rows)
         with _cache_lock:
             _cache[kind] = rows
         with open(_cache_file(kind), "w") as f:
@@ -1423,10 +1440,12 @@ def _fast_parse(text, customers, items):
             # Several ERP customer IDs may intentionally share a spoken name
             # (including homophones such as 三年间/叁年间). An exact pinyin
             # match is not ambiguous: use the ID seen in the newest ERP order.
-            if len(best_here) > 1 and sp and all(
-                    sp in (row.get("_voice_pys") or [])
-                    for row in best_here):
-                best_here = best_here[:1]
+            exact_pinyin = [row for row in best_here if sp and
+                            sp in (row.get("_voice_pys") or [])]
+            if exact_pinyin:
+                exact_pinyin.sort(key=lambda row: recent_rank.get(
+                    row["name"], float("inf")))
+                best_here = exact_pinyin[:1]
             cust, cust_score, cust_i = best_here[0], bs_here, idx
             cust_candidates = best_here if len(best_here) > 1 else None
     if not cust or cust_score < 4:
@@ -1760,7 +1779,10 @@ def _customer_voice_candidates(text, limit=5):
     # deliberately keep the customer used most recently in ERP first.
     names = list(dict.fromkeys(row[1] for row in ranked))[:limit]
     top_score = ranked[0][0] if ranked else 0.0
-    margin = top_score - (ranked[1][0] if len(ranked) > 1 else 0.0)
+    top_pinyin = _py_full(ranked[0][1]) if ranked else ""
+    next_distinct = next((row[0] for row in ranked[1:]
+                          if _py_full(row[1]) != top_pinyin), 0.0)
+    margin = top_score - next_distinct
     return names, top_score, margin
 
 
