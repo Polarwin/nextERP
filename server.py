@@ -884,7 +884,7 @@ _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口�
 {items}
 {learned}
 规则：
-- 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。
+- 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。带☆的是最近有ERP订单的客户，按订单新旧排在前；几个客户读音相同或相近时（如两个"漾叶")，必须选带☆的，多个带☆时选排最前的。
 - 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
 - 数量：中文或阿拉伯数字，单位瓶/箱等，可能在品名前面或后面。一箱=12瓶。没说数量默认1瓶。
 - 年份：未指明年份时选最新年份（如同时有22和25，选25)。
@@ -1553,8 +1553,19 @@ def _parse_transcript(text):
 
     with _cache_lock:
         ship_rules = [r["name"] for r in _cache["shipping_rules"]]
+    # Mark customers present in recent ERP orders (☆) and sort them first by
+    # recency, so the LLM can apply the newest-order tie-break for shared or
+    # homophone spoken names (漾叶 has two ERP IDs: 上海漾叶 / DC1M上海漾叶).
+    recent_rank = _customer_recent_order_rank()
+    ordered = sorted(
+        customers,
+        key=lambda c: (c["name"] not in recent_rank,
+                       recent_rank.get(c["name"], 0)))
+    customer_list = "、".join(
+        c["customer_name"] + ("☆" if c["name"] in recent_rank else "")
+        for c in ordered)
     prompt = _PARSE_PROMPT.format(
-        customers="、".join(c["customer_name"] for c in customers),
+        customers=customer_list,
         items="；".join(f"{i['item_code']}|{i.get('item_name', '')}"
                         for i in items),
         learned=_learned_hint(),
@@ -1564,10 +1575,14 @@ def _parse_transcript(text):
     # map LLM output back to real records (full catalog, not just prefiltered)
     customer = None
     if parsed.get("customer"):
-        customer = next(
-            (c for c in all_customers
-             if c["customer_name"] == parsed["customer"]
-             or c["name"] == parsed["customer"]), None)
+        wanted = str(parsed["customer"]).replace("☆", "").strip()
+        matches = [c for c in all_customers
+                   if c["customer_name"] == wanted or c["name"] == wanted]
+        if len(matches) > 1:
+            # shared/homophone name -> newest ERP order wins
+            matches.sort(key=lambda c: recent_rank.get(
+                c["name"], float("inf")))
+        customer = matches[0] if matches else None
     out_items, unmatched = [], []
     for it in parsed.get("items") or []:
         code = str(it.get("item_code") or "").strip()
