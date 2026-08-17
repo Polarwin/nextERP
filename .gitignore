@@ -30,3 +30,7 @@ site/
 voice_log.jsonl
 voice_customer_eval/
 customer_voice_focus.json
+customer_spoken_names.txt
+
+# SenseVoice ASR experiment model (229M, downloaded on demand)
+models/

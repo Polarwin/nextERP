@@ -77,5 +77,16 @@ it works under the `/luciatrading/` prefix and standalone.
 - Print formats: `Lucia2` (Sales Order), `销售出货` (Delivery Note).
 - Stock is deducted by ERPNext on Delivery Note **submit** (not on print) —
   submit ("提交出货（扣库存）") and print are separate buttons since 2026-08-15.
+- Voice rules (user requirements):
+  - Several ERP customers may share one spoken name (e.g. homophones
+    叁年间/三年间). Resolve to the customer with the **newest ERP order**
+    (`_customer_recent_order_rank` in `server.py`).
+  - Items that share a spoken name across vintages resolve to the **newest
+    vintage** (`_vintage`).
+  - `voice_customer_eval.py` synthesizes spoken orders with edge-tts and tests
+    the production ASR pipeline; `--harvest` folds Whisper mishearings back
+    into `learned_aliases.json`. Never alias a phrase that is itself another
+    customer's/item's spoken name. **Full testing/improvement workflow:
+    `VOICE_TESTING.md`.**
 - Careful with tests: never submit real Delivery Notes / Sales Orders except
   in a create → cancel → delete cleanup cycle.

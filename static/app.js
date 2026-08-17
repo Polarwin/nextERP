@@ -649,7 +649,15 @@ function renderNewOrder() {
           <button class="link-btn" onclick="clearCustomer()">更换</button>
         </div>
         ${no.customer_uncertain
-          ? `<div class="meta" id="customer-warning" style="color:#d97706;margin-top:8px">⚠️ 客户识别不确定，请核对</div>`
+          ? `<div class="meta" id="customer-warning" style="color:#d97706;margin-top:8px">
+              ⚠️ 客户识别不确定，请核对
+              ${(no.customer_suggestions || []).length ? `
+                <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">
+                  ${no.customer_suggestions.map((c, i) => `
+                    <button class="link-btn" onclick="pickCustomerSuggestion(${i})">${esc(c.customer_name)}</button>
+                  `).join("")}
+                </div>` : ""}
+            </div>`
           : ""}
       </div>
       ${no.candidates && !no.customer ? `
@@ -789,6 +797,7 @@ function undoVoice() {
 function clearCustomer() {
   no.customer = null; no.customer_name = null;
   no.customer_uncertain = false;
+  no.customer_suggestions = [];
   no.candidates = null;
   document.getElementById("cust-picked").classList.add("hidden");
   document.getElementById("cust-search").classList.remove("hidden");
@@ -860,12 +869,18 @@ function renderCustomerHits(rows) {
 function pickCustomer(name, display) {
   no.customer = name; no.customer_name = display;
   no.customer_uncertain = false;
+  no.customer_suggestions = [];
   const warning = document.getElementById("customer-warning");
   if (warning) warning.remove();
   document.getElementById("cust-picked").classList.remove("hidden");
   document.getElementById("cust-picked").querySelector(".customer").textContent = display;
   document.getElementById("cust-search").classList.add("hidden");
   repriceItemsForCustomer(name);
+}
+
+function pickCustomerSuggestion(i) {
+  const customer = (no.customer_suggestions || [])[i];
+  if (customer) pickCustomer(customer.name, customer.customer_name);
 }
 
 async function repriceItemsForCustomer(customer) {
@@ -1176,6 +1191,7 @@ function applyParsedOrder(d, text) {
   no.voice = { text, parsed: d };  // kept for auto-learning on submit
   no.candidates = null;
   no.customer_uncertain = Boolean(d.customer_uncertain);
+  no.customer_suggestions = d.customer_suggestions || [];
   // track exactly what this parse applied, so 🔁重讲 can undo it cleanly
   const applied = { items: [], customer_set: false, prev_customer: no.customer,
                     prev_customer_name: no.customer_name,

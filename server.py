@@ -170,14 +170,60 @@ def _py_initials(s):
         str(s or ""), style=Style.FIRST_LETTER)).replace(" ", "").lower()
 
 
+_CUSTOMER_CATEGORY_RE = re.compile(
+    r"^(?:OLC1W|DC1M|DC1W|DCIM|RIC|EIC|VIP|OL|OT|D|E|S)\s*",
+    re.IGNORECASE)
+
+
+def _spoken_customer_name(name):
+    """Customer name as people say it, without internal ERP categories."""
+    return _CUSTOMER_CATEGORY_RE.sub("", str(name or "")).strip()
+
+
+CUSTOMER_SPOKEN_NAMES_FILE = "customer_spoken_names.txt"
+
+
+def _load_customer_spoken_names():
+    """Read the local, user-maintained customer voice dictionary."""
+    aliases = {}
+    try:
+        with open(CUSTOMER_SPOKEN_NAMES_FILE, encoding="utf-8") as f:
+            current_id = None
+            for raw in f:
+                line = raw.strip()
+                if line.startswith("customer_id ="):
+                    current_id = line.split("=", 1)[1].strip()
+                    aliases.setdefault(current_id, [])
+                elif line.startswith("spoken_name =") and current_id:
+                    spoken = line.split("=", 1)[1].strip()
+                    if spoken and spoken not in aliases[current_id]:
+                        aliases[current_id].append(spoken)
+    except OSError:
+        return {}
+    return aliases
+
+
 def _annotate(kind, rows):
     """Attach pinyin search fields (_py full, _ini initials) to cached rows."""
     field = {"customers": "customer_name", "items": "item_name"}.get(kind)
     if not field:
         return rows
+    spoken_names = _load_customer_spoken_names() if kind == "customers" else {}
     for r in rows:
         r["_py"] = _py_full(r.get(field))
         r["_ini"] = _py_initials(r.get(field))
+        if kind == "customers":
+            spoken = _spoken_customer_name(r.get(field))
+            voice_names = list(dict.fromkeys(
+                spoken_names.get(r.get("name"), []) + [spoken]))
+            r["_spoken"] = spoken
+            r["_spoken_norm"] = spoken.lower().replace(" ", "")
+            r["_spoken_py"] = _py_full(spoken)
+            r["_voice_names"] = voice_names
+            r["_voice_norms"] = [x.lower().replace(" ", "")
+                                 for x in voice_names]
+            r["_voice_pys"] = [_py_full(x) for x in voice_names]
+            r["_voice_inis"] = [_py_initials(x) for x in voice_names]
     return rows
 
 
@@ -238,6 +284,22 @@ def cache_search(kind, q, fields, limit=20):
 
 load_cache_from_disk()
 threading.Thread(target=_cache_refresher, daemon=True).start()
+
+
+def _customer_recent_order_rank():
+    """Customer ID -> position of its newest appearance in ERP orders.
+
+    recent_orders is fetched newest-first. This is the deterministic
+    tie-breaker when two spoken names have identical pinyin.
+    """
+    with _cache_lock:
+        recent = list(_cache["recent_orders"])
+    rank = {}
+    for index, order in enumerate(recent):
+        customer = order.get("customer")
+        if customer and customer not in rank:
+            rank[customer] = index
+    return rank
 
 # ---------------------------------------------------------------- PDF engine
 # Playwright's sync API is bound to the thread that started it, so all
@@ -508,9 +570,9 @@ def create_customer():
         return jsonify(body), code
     created = body["data"]
     # add to local cache immediately so search finds it
-    row = {"name": created["name"],
+    row = _annotate("customers", [{"name": created["name"],
            "customer_name": created["customer_name"],
-           "default_price_list": created.get("default_price_list")}
+           "default_price_list": created.get("default_price_list")}])[0]
     with _cache_lock:
         _cache["customers"].append(row)
     try:
@@ -1037,12 +1099,94 @@ _VOICE_ALIAS_FILE = "voice_aliases.json"
 _QTY_ONLY = re.compile(
     r"^([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
     r"(瓶|箱|盒|个|支|件|听)?$")
+_QTY_START = re.compile(
+    r"([0-9]+|[零一二两三四五六七八九十]{1,3})\s*"
+    r"(瓶|箱|盒|个|支|件|听)")
+
+
+def _customer_prefix(phrase):
+    """Longest known customer voice name prefixing the phrase (hanzi, or
+    pinyin for mishearings like 样页~漾叶). Keeps the heard form."""
+    with _cache_lock:
+        customers = list(_cache["customers"])
+    phrase_py = _py_full(phrase)
+    best = None
+    for c in customers:
+        for name, py in zip(c.get("_voice_names", []),
+                            c.get("_voice_pys", [])):
+            if len(name) < 2:
+                continue
+            if phrase.startswith(name) or (py and phrase_py.startswith(py)):
+                if best is None or len(name) > len(best):
+                    best = name
+    return phrase[:len(best)] if best else None
+
+
+def _customer_voice_phrase(text):
+    """Customer prefix from either a paused or continuous spoken order."""
+    first = _SPLIT_RE.split(str(text or ""), maxsplit=1)[0].strip()
+    qty = _QTY_START.search(first)
+    if qty:
+        first = first[:qty.start()].strip()
+    first = re.sub(r"^(?:给|帮|客户)\s*", "", first)
+    # item-before-quantity orders (漾叶要日晷园三瓶 / 漾叶日晷园三瓶): the
+    # customer is what precedes the verb, or a known voice-name prefix
+    verb = re.search(r"(?:下单|订购|购买|要|来买|来|买)", first)
+    if verb:
+        first = first[:verb.start()]
+    else:
+        first = _customer_prefix(first) or first
+    first = re.sub(r"(?:下单|订购|购买|买|要|来)\s*$", "", first)
+    return first.strip()
 
 
 def _seg_list(text):
     """Split a transcript, keeping bare qty tokens ('五瓶', '2') glued to the
     preceding segment ('阿尔巴利诺 五瓶' -> ['一杯','阿尔巴利诺五瓶'])."""
     raw = [s.strip() for s in _SPLIT_RE.split(text) if s.strip()]
+    # Split quantity clauses even when Whisper mixes punctuation and a
+    # continuous sentence. A standalone vintage (", 2025年,") belongs to the
+    # preceding item rather than becoming an unmatched segment.
+    expanded = []
+    for index, segment in enumerate(raw):
+        if re.fullmatch(r"(?:19|20)\d{2}年?", segment) and expanded:
+            expanded[-1] += segment
+            continue
+        segment = re.sub(r"^(?:和|及|再来|再要|再加|还有|然后|另外)",
+                         "", segment).strip()
+        qty_matches = list(_QTY_START.finditer(segment))
+        if not qty_matches:
+            expanded.append(segment)
+            continue
+        if index == 0 and qty_matches[0].start() > 0:
+            customer = _customer_voice_phrase(segment)
+            if customer:
+                expanded.append(customer)
+                # item may precede the qty (漾叶日晷园三瓶): keep the words
+                # between customer/verb and the quantity as the item name;
+                # qty-first (漾叶要三瓶日晷园) drops the customer head.
+                head = segment[:qty_matches[0].start()]
+                item_lead = head.split(customer, 1)[-1] \
+                    if customer in head else ""
+                item_lead = re.sub(
+                    r"^(?:下单|订购|购买|要|来买|来|买)", "", item_lead).strip()
+                segment = item_lead + segment[qty_matches[0].start():]
+                qty_matches = list(_QTY_START.finditer(segment))
+        # the split below separates qty tokens and the glue step reattaches
+        # them, so both 三瓶日晷园 and 日晷园三瓶 keep the item name intact
+        item_text = segment
+        if index > 0:
+            item_text = re.sub(r"^(?:下单|订购|购买|要|来买|来|买)", "",
+                               item_text)
+        item_text = re.sub(
+            r"(?:和|及|再来|再要|再加|还有|然后|另外)\s*"
+            r"(?=[0-9零一二两三四五六七八九十]{1,3}\s*"
+            r"(?:瓶|箱|盒|个|支|件|听))", "", item_text)
+        expanded.extend(s.strip() for s in re.split(
+            r"(?<![0-9零一二两三四五六七八九十])"
+            r"(?=[0-9零一二两三四五六七八九十]{1,3}\s*"
+            r"(?:瓶|箱|盒|个|支|件|听))", item_text) if s.strip())
+    raw = expanded
     # spoken orders often prepend 给 to the customer: 给漾叶 -> 漾叶
     raw = [s[1:] if s.startswith("给") and len(s) > 1 else s for s in raw]
     out = []
@@ -1182,6 +1326,43 @@ def _prefilter_catalog(text, customers, items, n_cust=50, n_items=60):
             rank(items, "item_name"))
 
 
+def _branch_customer_rescue(text, segments, customers):
+    """Rescue branch customers whose head Whisper mishears (葡萄/普道 for
+    葡道). Orders start with the customer, so: grep the branch keyword's
+    pinyin in the full-transcript pinyin (homophone branches like
+    闪康礼店/陕康里店 share pinyin and still match), and fuzzy-match the head
+    against the leading customer phrase, also by pinyin.
+    Returns (customer_row, branch_hanzi) or None."""
+    phrase = _customer_voice_phrase(text) or (segments[0] if segments else "")
+    phrase_py = _py_full(phrase)
+    text_py = _py_full(text)
+    if not phrase_py or not text_py:
+        return None
+    recent_rank = _customer_recent_order_rank()
+    scored = []
+    for c in customers:
+        for voice in (c.get("_voice_names") or []):
+            head, sep, branch = voice.partition("-")
+            if not sep or not branch:
+                continue
+            head_py, branch_py = _py_full(head), _py_full(branch)
+            if len(branch_py) < 4 or branch_py not in text_py:
+                continue
+            score = max(
+                difflib.SequenceMatcher(None, phrase_py, head_py).ratio(),
+                difflib.SequenceMatcher(
+                    None, phrase_py[:len(head_py)], head_py).ratio())
+            if score >= 0.6:
+                scored.append((score, c, branch, branch_py))
+    if not scored:
+        return None
+    # shared spoken name -> the customer with the newest ERP order
+    scored.sort(key=lambda row: (
+        -row[0], recent_rank.get(row[1]["name"], float("inf"))))
+    _, customer, branch, branch_py = scored[0]
+    return customer, branch, branch_py
+
+
 def _fast_parse(text, customers, items):
     """Instant local parse for clear-cut transcripts.
     Returns the result dict, or None when anything is ambiguous (then the
@@ -1219,17 +1400,58 @@ def _fast_parse(text, customers, items):
                           or c.get("customer_name") == alias):
                 s = 25.0  # curated alias — beats fuzzy matches
             else:
-                s = _relevance(sn, sp, c, "customer_name")
+                s = max(
+                    [_relevance(sn, sp, c, "customer_name")] + [
+                        _relevance(sn, sp, {
+                            "voice": voice,
+                            "_py": voice_py,
+                            "_ini": voice_ini,
+                        }, "voice")
+                        for voice, voice_py, voice_ini in zip(
+                            c.get("_voice_names", []),
+                            c.get("_voice_pys", []),
+                            c.get("_voice_inis", []))])
             if s > bs_here + 0.01:
                 best_here, bs_here = [c], s
             elif abs(s - bs_here) <= 0.01 and s > 0:
                 if all(c["name"] != x["name"] for x in best_here):
                     best_here.append(c)
         if bs_here > cust_score:
+            recent_rank = _customer_recent_order_rank()
+            best_here.sort(key=lambda row: recent_rank.get(
+                row["name"], float("inf")))
+            # Several ERP customer IDs may intentionally share a spoken name
+            # (including homophones such as 三年间/叁年间). An exact pinyin
+            # match is not ambiguous: use the ID seen in the newest ERP order.
+            if len(best_here) > 1 and sp and all(
+                    sp in (row.get("_voice_pys") or [])
+                    for row in best_here):
+                best_here = best_here[:1]
             cust, cust_score, cust_i = best_here[0], bs_here, idx
             cust_candidates = best_here if len(best_here) > 1 else None
     if not cust or cust_score < 4:
-        return None
+        # Customer head may be misheard (葡萄 for 葡道) while the branch
+        # keyword survives; try pinyin head-match + branch grep before
+        # giving up to the LLM.
+        rescued = _branch_customer_rescue(text, segments, customers)
+        if not rescued:
+            return None
+        cust, branch, branch_py = rescued
+        # The head phrase may have absorbed the branch ("葡萄东湖路店"):
+        # strip the branch words from the customer segment so item parsing
+        # does not see them.
+        seg0 = segments[0] if segments else ""
+        seg0 = seg0.replace(branch, "")
+        rest = [s.replace(branch, "") for s in segments[1:]]
+        segments = ([seg0] if seg0 else []) + rest
+        segments = [s for s in segments if s and _py_full(s) != branch_py]
+        cust_i = 0 if seg0 else -1
+        if not segments:
+            return {"customer": {"name": cust["name"],
+                                 "customer_name": cust["customer_name"]},
+                    "customer_phrase": _customer_voice_phrase(text),
+                    "items": [], "unmatched": [], "notes": None,
+                    "shipping_rule": shipping, "freight": freight}
     out = []
     for idx, seg in enumerate(segments):
         if idx == cust_i:
@@ -1274,7 +1496,8 @@ def _fast_parse(text, customers, items):
         return None
     result = {"customer": None if cust_candidates else
               {"name": cust["name"], "customer_name": cust["customer_name"]},
-              "customer_phrase": segments[cust_i],
+              "customer_phrase": segments[cust_i] if cust_i >= 0
+              else _customer_voice_phrase(text),
               "items": out, "unmatched": [], "notes": None,
               "shipping_rule": shipping, "freight": freight}
     if cust_candidates:
@@ -1284,13 +1507,39 @@ def _fast_parse(text, customers, items):
     return result
 
 
-def _parse_transcript(text):
-    """Shared pipeline: transcript text -> customer + items + notes.
-    Fast local parse first; LLM (kimi/codex CLI) only for hard cases."""
+def _normalize_transcript_text(text):
     # whisper mishears 五瓶 as 物品 (wǔpíng/wùpǐn); the app never uses 物品
     text = text.replace("物品", "五瓶")
     # and 瓶 as 平/坪 after a number ("8平" -> "8瓶", "两坪" -> "两瓶")
     text = re.sub(r"([0-9零一二两三四五六七八九十])\s*[平坪]", r"\1瓶", text)
+    # Whisper may insert a space after a leading quantity ("12瓶 天梯园").
+    # Keep it in the same segment so it cannot attach to the customer name.
+    text = re.sub(
+        r"([0-9零一二两三四五六七八九十]{1,3}\s*"
+        r"(?:瓶|箱|盒|个|支|件|听))\s+(?=\S)", r"\1", text)
+    # Stable Whisper homophones observed in synthesized full-order tests.
+    # These are wine names in this app, not ordinary prose.
+    replacements = [
+        (r"日[轨鬼晷][圆元源]", "日晷园"),
+        (r"[荷喝赫][曼慢]干[白摆]", "赫曼干白"),
+        (r"森林[圆元源]", "森林园"),
+        (r"天梯[圆元]", "天梯园"),
+        (r"零[西希吸][圆元源]", "灵犀园"),
+        (r"[列页念][墨末莫][圆元源]", "涅墨园"),
+        (r"([六6])\s*[好號]", r"\1号"),
+        # 葡道 branches are always said with the branch (葡道东湖路店);
+        # Whisper hears 葡萄、东湖路店 — rejoin so branch matching works.
+        (r"葡萄[、，,]?\s*(?=\S{1,8}店)", "葡道"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    return text
+
+
+def _parse_transcript(text):
+    """Shared pipeline: transcript text -> customer + items + notes.
+    Fast local parse first; LLM (kimi/codex CLI) only for hard cases."""
+    text = _normalize_transcript_text(text)
     with _cache_lock:
         all_customers = list(_cache["customers"])
         all_items = list(_cache["items"])
@@ -1375,17 +1624,30 @@ def _parse_transcript(text):
 _whisper = {"model": None, "lock": threading.Lock()}
 
 
-_CUSTOMER_CATEGORY_RE = re.compile(
-    r"^(?:OLC1W|DC1M|DC1W|DCIM|RIC|EIC|VIP|OL|OT|D|E|S)\s*",
-    re.IGNORECASE)
+def _item_spoken_names(it):
+    """The ways an item is SAID: catalogue lead, winery-stripped form,
+    vineyard 园 short names (+GG). Shared by _hotwords and the voice eval."""
+    name = it.get("item_name") or ""
+    names = []
+    lead = re.match(r"[一-鿿]{2,12}", name)
+    if not lead:
+        return names
+    names.append(lead.group(0)[:8])          # 幸运甜心犬莫斯卡 / 美鸭鸭莫斯卡托
+    stripped = re.sub(r"^[一-鿿]{2,6}酒庄", "", name)
+    if stripped != name:
+        m = re.match(r"[一-鿿]{2,8}", stripped)
+        if m:
+            names.append(m.group(0)[:8])     # 丹魄干红 / 雷司令干白
+    # vineyard names the way people SAY them: 艾尔登村天梯园 -> 天梯园
+    for m in re.finditer(r"[一-鿿]{2,5}园", name):
+        short = re.sub(r"^.*村", "", m.group(0))
+        names.append(short)                  # 天梯园 / 日晷园 / 森林园
+        if "GG" in name:
+            names.append(short + "GG")       # 天梯园GG / 森林园GG
+    return names
 
 
-def _spoken_customer_name(name):
-    """Customer name as people say it, without internal ERP categories."""
-    return _CUSTOMER_CATEGORY_RE.sub("", str(name or "")).strip()
-
-
-def _hotwords():
+def _hotwords(focus_names_override=None):
     """Domain vocabulary for whisper: distinctive item short-names (winery
     prefixes stripped, vineyard 园 names extracted), item codes, customer
     names — so 甜心犬/美鸭鸭/天梯园 are heard correctly.
@@ -1395,32 +1657,19 @@ def _hotwords():
         items = list(_cache["items"])
         customers = list(_cache["customers"])
     for it in items:
-        name = it.get("item_name") or ""
         if it.get("item_code"):
             codes.append(it["item_code"])
-        lead = re.match(r"[一-鿿]{2,12}", name)
-        if not lead:
-            continue
-        names.append(lead.group(0)[:8])          # 幸运甜心犬莫斯卡 / 美鸭鸭莫斯卡托
-        stripped = re.sub(r"^[一-鿿]{2,6}酒庄", "", name)
-        if stripped != name:
-            m = re.match(r"[一-鿿]{2,8}", stripped)
-            if m:
-                names.append(m.group(0)[:8])     # 丹魄干红 / 雷司令干白
-        # vineyard names the way people SAY them: 艾尔登村天梯园 -> 天梯园
-        for m in re.finditer(r"[一-鿿]{2,5}园", name):
-            short = re.sub(r"^.*村", "", m.group(0))
-            names.append(short)                  # 天梯园 / 日晷园 / 森林园
-            if "GG" in name:
-                names.append(short + "GG")       # 天梯园GG / 森林园GG
+        names += _item_spoken_names(it)
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
               "灵犀园", "灵犀园晚摘", "金滴园", "云岭干红", "云岭", "涅墨园",
               "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG", "熊进",
               "herman干白", "赫曼干白",
               "德邦", "顺丰", "冰袋", "隔热膜", "运费",
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
-    cust_names = [_spoken_customer_name(c["customer_name"])
-                  for c in customers if c.get("customer_name")]
+    cust_names = [name for c in customers if c.get("customer_name")
+                  for name in (c.get("_voice_names") or [
+                      c.get("_spoken") or
+                      _spoken_customer_name(c["customer_name"])])]
     # branch customers (葡道-陆家嘴店 etc.) are said without the dash —
     # guarantee those spoken forms a hotword slot
     for c in cust_names:
@@ -1431,8 +1680,9 @@ def _hotwords():
     with _cache_lock:
         recent = list(_cache["recent_orders"])
     freq = Counter(o.get("customer") for o in recent if o.get("customer"))
-    customer_names = {c.get("name"): _spoken_customer_name(
-        c.get("customer_name") or c.get("name")) for c in customers}
+    customer_names = {c.get("name"): c.get("_spoken")
+        or _spoken_customer_name(c.get("customer_name") or c.get("name"))
+        for c in customers}
     hot_custs = [customer_names.get(c, _spoken_customer_name(c))
                  for c, _ in freq.most_common(30)]
     # whisper only keeps the END of a long prompt (~few hundred chars), so
@@ -1441,11 +1691,14 @@ def _hotwords():
     names = list(dict.fromkeys(names))           # dedupe, keep order
     cust_names = list(dict.fromkeys(x for x in cust_names if x))
     hot_custs = list(dict.fromkeys(x for x in hot_custs if x))
-    try:
-        with open("customer_voice_focus.json") as f:
-            focus_names = json.load(f)
-    except (OSError, ValueError, TypeError):
-        focus_names = []
+    if focus_names_override is None:
+        try:
+            with open("customer_voice_focus.json") as f:
+                focus_names = json.load(f)
+        except (OSError, ValueError, TypeError):
+            focus_names = []
+    else:
+        focus_names = focus_names_override
     focus_names = [_spoken_customer_name(x) for x in focus_names if x]
     # Focus names go last because Whisper retains the end of a long prompt.
     return "，".join(codes + cust_names + names + hot_custs
@@ -1464,25 +1717,33 @@ def _whisper_model():
 
 def _customer_voice_candidates(text, limit=5):
     """Closest spoken customer names for a focused second ASR pass."""
-    segments = _seg_list(text)
-    phrase = segments[0] if segments else text
+    phrase = _customer_voice_phrase(text) or text
     phrase_n = _norm(phrase)
     phrase_py = _py_full(phrase)
     with _cache_lock:
         customers = list(_cache["customers"])
     scores = {}
+    recent_rank = _customer_recent_order_rank()
     for customer in customers:
-        spoken = _spoken_customer_name(
-            customer.get("customer_name") or customer.get("name"))
-        spoken_n = _norm(spoken)
-        spoken_py = _py_full(spoken)
-        score = max(
-            difflib.SequenceMatcher(None, phrase_n, spoken_n).ratio(),
-            difflib.SequenceMatcher(None, phrase_py, spoken_py).ratio())
-        scores[spoken] = max(score, scores.get(spoken, 0.0))
-    ranked = [(score, spoken) for spoken, score in scores.items()]
-    ranked.sort(key=lambda row: row[0], reverse=True)
-    names = [name for _, name in ranked[:limit]]
+        voice_names = customer.get("_voice_names") or [
+            customer.get("_spoken") or _spoken_customer_name(
+                customer.get("customer_name") or customer.get("name"))]
+        voice_norms = customer.get("_voice_norms") or [_norm(x) for x in voice_names]
+        voice_pys = customer.get("_voice_pys") or [_py_full(x) for x in voice_names]
+        for spoken, spoken_n, spoken_py in zip(
+                voice_names, voice_norms, voice_pys):
+            score = max(
+                difflib.SequenceMatcher(None, phrase_n, spoken_n).ratio(),
+                difflib.SequenceMatcher(None, phrase_py, spoken_py).ratio())
+            key = (spoken, customer["name"])
+            scores[key] = max(score, scores.get(key, 0.0))
+    ranked = [(score, spoken, customer_id)
+              for (spoken, customer_id), score in scores.items()]
+    ranked.sort(key=lambda row: (-row[0], recent_rank.get(
+        row[2], float("inf"))))
+    # Whisper needs names, not duplicate customer IDs. Pinyin-equivalent names
+    # deliberately keep the customer used most recently in ERP first.
+    names = list(dict.fromkeys(row[1] for row in ranked))[:limit]
     top_score = ranked[0][0] if ranked else 0.0
     margin = top_score - (ranked[1][0] if len(ranked) > 1 else 0.0)
     return names, top_score, margin
@@ -1493,22 +1754,57 @@ def _customer_rows_for_spoken_names(names):
     with _cache_lock:
         customers = list(_cache["customers"])
     rows = []
+    recent_rank = _customer_recent_order_rank()
     for spoken in names:
-        for customer in customers:
-            customer_spoken = _spoken_customer_name(
-                customer.get("customer_name") or customer.get("name"))
-            if customer_spoken == spoken and all(
-                    row["name"] != customer["name"] for row in rows):
+        matches = [customer for customer in customers
+                   if spoken in (customer.get("_voice_names") or [])]
+        matches.sort(key=lambda customer: recent_rank.get(
+            customer["name"], float("inf")))
+        for customer in matches:
+            if all(row["name"] != customer["name"] for row in rows):
                 rows.append({"name": customer["name"],
                              "customer_name": customer["customer_name"]})
     return rows
 
 
-def _transcribe_audio(path, initial_prompt):
+def _transcribe_audio(path, initial_prompt, hotwords):
     segments, _ = _whisper_model().transcribe(
         path, language="zh", beam_size=1, vad_filter=True,
-        hotwords=_hotwords(), initial_prompt=initial_prompt)
+        hotwords=hotwords, initial_prompt=initial_prompt)
     return "".join(segment.text for segment in segments).strip()
+
+
+def _recognize_order_audio(path, hotwords=None):
+    """Production ASR pipeline, shared by the API and voice evaluator."""
+    base_prompt = "葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。"
+    hotwords = _hotwords() if hotwords is None else hotwords
+    text = _normalize_transcript_text(
+        _transcribe_audio(path, base_prompt, hotwords))
+    candidates, score, margin = _customer_voice_candidates(text)
+    phrase = _norm(_customer_voice_phrase(text) or text)
+    exact = any(phrase == _norm(name) for name in candidates)
+    passes = 1
+    if text and candidates and not exact and (score < 0.88 or margin < 0.12):
+        retry_prompt = (base_prompt + " 候选客户："
+                        + "、".join(candidates) + "。")
+        retry_text = _normalize_transcript_text(
+            _transcribe_audio(path, retry_prompt, hotwords))
+        passes += 1
+        retry_candidates, retry_score, retry_margin = \
+            _customer_voice_candidates(retry_text)
+        if retry_text and retry_score > score:
+            text = retry_text
+            candidates = retry_candidates
+            score = retry_score
+            margin = retry_margin
+    customer_phrase = _customer_voice_phrase(text) or text
+    phrase = _norm(customer_phrase)
+    exact = any(phrase == _norm(name) for name in candidates)
+    uncertain = not exact and (score < 0.88 or margin < 0.12)
+    return {"text": text, "customer_phrase": customer_phrase,
+            "customer_candidates": candidates, "customer_score": score,
+            "customer_margin": margin, "customer_exact": exact,
+            "customer_uncertain": uncertain, "passes": passes}
 
 
 threading.Thread(target=_whisper_model, daemon=True).start()
@@ -1549,23 +1845,8 @@ def parse_audio():
     try:
         import time
         t0 = time.time()
-        base_prompt = "葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。"
-        text = _transcribe_audio(tmp.name, base_prompt)
-        # If the customer was not heard exactly, use the dictionary to build a
-        # tiny candidate list and retry. A short immediate prompt influences
-        # Whisper much more reliably than the full 400+ customer hotword list.
-        candidates, first_score, _first_margin = \
-            _customer_voice_candidates(text)
-        first_phrase = _norm((_seg_list(text) or [text])[0])
-        exact = any(first_phrase == _norm(name) for name in candidates)
-        if text and candidates and not exact:
-            retry_prompt = (base_prompt + " 候选客户："
-                            + "、".join(candidates) + "。")
-            retry_text = _transcribe_audio(tmp.name, retry_prompt)
-            _retry_candidates, retry_score, _retry_margin = \
-                _customer_voice_candidates(retry_text)
-            if retry_text and retry_score > first_score:
-                text = retry_text
+        recognition = _recognize_order_audio(tmp.name)
+        text = recognition["text"]
         t_asr = time.time()
         if not text:
             dest = _save_recording(tmp.name, suffix, "")
@@ -1574,19 +1855,14 @@ def parse_audio():
                    "error": "empty transcript"})
             return jsonify({"error": "没听清，请再试一次"}), 422
         result = _parse_transcript(text)
-        final_candidates, final_score, final_margin = \
-            _customer_voice_candidates(text)
-        final_phrase = _norm((_seg_list(text) or [text])[0])
-        final_exact = any(final_phrase == _norm(name)
-                          for name in final_candidates)
         # Keep the best parsed customer selected, but flag weak/close evidence
         # so the UI prominently asks the user to verify it.
-        if not final_exact and (final_score < 0.88 or final_margin < 0.12):
+        if recognition["customer_uncertain"]:
             picker_rows = _customer_rows_for_spoken_names(
-                final_candidates[:5])
+                recognition["customer_candidates"][:5])
             result["customer_uncertain"] = True
             result["customer_suggestions"] = picker_rows
-            result["customer_phrase"] = (_seg_list(text) or [text])[0]
+            result["customer_phrase"] = recognition["customer_phrase"]
         result["text"] = text
         dest = _save_recording(tmp.name, suffix, text)
         _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),

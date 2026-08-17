@@ -1,14 +1,13 @@
-"""Synthesize and test every customer name against production Whisper.
+"""Synthesize full spoken orders and test the production voice pipeline.
 
-Generated audio, results, and the local focus file are gitignored. This script
-never writes to ERPNext.
+The customer dictionary, generated audio, and results stay local/gitignored.
+This script only reads ERP cache data and never creates or changes ERP records.
 """
 import argparse
 import asyncio
 import hashlib
 import json
 import os
-import re
 
 import edge_tts
 
@@ -16,102 +15,484 @@ import server
 
 
 OUT_DIR = "voice_customer_eval"
-AUDIO_DIR = os.path.join(OUT_DIR, "audio")
-RESULTS_FILE = os.path.join(OUT_DIR, "results.json")
+AUDIO_DIR = os.path.join(OUT_DIR, "order_audio")
+RESULTS_FILE = os.path.join(OUT_DIR, "order_results.json")
+RANDOM_RESULTS_FILE = os.path.join(OUT_DIR, "random_results.json")
+RECENT_RESULTS_FILE = os.path.join(OUT_DIR, "recent_results.json")
 FOCUS_FILE = "customer_voice_focus.json"
+# Random suite writes here so concurrent suite runs never clobber each other.
+ACTIVE_RESULTS_FILE = RESULTS_FILE
 VOICE = "zh-CN-XiaoxiaoNeural"
+QUANTITIES = [(2, "两"), (3, "三"), (6, "六"), (12, "十二")]
+WINES = [
+    ("日晷园", "GH006-24"),
+    ("赫曼干白", "GH001-25"),
+    ("森林园GG", "GH003-24"),
+    ("天梯园六号", "GH005-23"),
+    ("灵犀园晚摘", "GH015-24"),
+    ("涅墨园", "ES023-21"),
+]
+# Fixed anchor customer for item-suite sentences: reliably recognized
+# (curated alias + hotword), so failures isolate the item name.
+ITEM_SUITE_CUSTOMER = ("熊进", "VIP熊进")
 
 
-def normalized(value):
-    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value).lower())
-
-
-def audio_path(name):
-    digest = hashlib.sha256(name.encode()).hexdigest()[:16]
+def audio_path(sentence):
+    digest = hashlib.sha256(sentence.encode()).hexdigest()[:20]
     return os.path.join(AUDIO_DIR, f"{digest}.mp3")
 
 
-def customer_names():
-    with open("cache/customers.json") as f:
-        rows = json.load(f)
-    return list(dict.fromkeys(
-        server._spoken_customer_name(row.get("customer_name"))
-        for row in rows if row.get("customer_name")))
+def dictionary_rows():
+    aliases = server._load_customer_spoken_names()
+    return [(customer_id, spoken)
+            for customer_id, names in aliases.items()
+            for spoken in names]
 
 
-async def synthesize_one(name, semaphore):
-    path = audio_path(name)
+def expected_customer_id(spoken):
+    """Exact-pinyin collisions resolve to the most recently used ERP ID."""
+    spoken_py = server._py_full(spoken)
+    recent_rank = server._customer_recent_order_rank()
+    with server._cache_lock:
+        customers = list(server._cache["customers"])
+    matches = [row for row in customers
+               if spoken_py in (row.get("_voice_pys") or [])]
+    if not matches:
+        return None
+    matches.sort(key=lambda row: recent_rank.get(
+        row["name"], float("inf")))
+    return matches[0]["name"]
+
+
+def test_cases(limit=None):
+    cases = []
+    for index, (dictionary_id, spoken) in enumerate(dictionary_rows()):
+        qty, qty_spoken = QUANTITIES[index % len(QUANTITIES)]
+        wine_spoken, item_code = WINES[index % len(WINES)]
+        sentence = f"{spoken}要{qty_spoken}瓶{wine_spoken}"
+        cases.append({
+            "suite": "customers",
+            "dictionary_customer_id": dictionary_id,
+            "expected_customer_id": expected_customer_id(spoken),
+            "spoken_name": spoken,
+            "wine_name": wine_spoken,
+            "expected_item_code": item_code,
+            "quantity": qty,
+            "sentence": sentence,
+        })
+    return cases[:limit] if limit else cases
+
+
+def item_spoken_names():
+    """Spoken item name -> item codes that share it (vintage variants)."""
+    with server._cache_lock:
+        items = list(server._cache["items"])
+    names = {}
+    for it in items:
+        for spoken in server._item_spoken_names(it):
+            names.setdefault(spoken, set()).add(it.get("item_code"))
+    return {spoken: sorted(codes) for spoken, codes in names.items()}
+
+
+def item_alias_rows():
+    """Spoken alias -> item_code, from the curated voice_aliases.json.
+    Only aliases whose target is a real cached item code (some values are
+    customer names or trait words like GG)."""
+    try:
+        with open(server._VOICE_ALIAS_FILE, encoding="utf-8") as f:
+            aliases = json.load(f)
+    except (OSError, ValueError):
+        return []
+    with server._cache_lock:
+        codes = {it.get("item_code") for it in server._cache["items"]}
+    return [(spoken, code) for spoken, code in aliases.items()
+            if code in codes]
+
+
+def _shortest(names):
+    return min(names, key=len) if names else None
+
+
+def recent_test_cases(orders_file="/tmp/last20_orders.json"):
+    """Replay the last N real ERP orders the way the user would dictate
+    them: shortest spoken customer name + shortest spoken item name +
+    the real quantities. Multi-item orders become multi-clause sentences."""
+    with open(orders_file, encoding="utf-8") as f:
+        orders = json.load(f)
+    with server._cache_lock:
+        customers = {c["name"]: c for c in server._cache["customers"]}
+        items = {it["item_code"]: it for it in server._cache["items"]}
+    spoken_to_codes = item_spoken_names()
+    alias_by_code = {}
+    for spoken, code in item_alias_rows():
+        alias_by_code.setdefault(code, []).append(spoken)
+
+    cases = []
+    for order in orders:
+        cust = customers.get(order["customer"])
+        if not cust:
+            continue
+        cust_spoken = _shortest(cust.get("_voice_names") or
+                                [cust.get("_spoken")])
+        if not cust_spoken:
+            continue
+        clauses, expected = [], []
+        skip = False
+        for row in order["items"]:
+            code = row["item_code"]
+            it = items.get(code)
+            if not it:
+                skip = True
+                break
+            names = (server._item_spoken_names(it) +
+                     alias_by_code.get(code, []))
+            item_spoken = _shortest(names)
+            if not item_spoken:
+                skip = True
+                break
+            qty = int(row["qty"])
+            clauses.append(f"{qty}瓶{item_spoken}")
+            # any vintage sharing this spoken name is acceptable
+            acceptable = spoken_to_codes.get(item_spoken, [code])
+            expected.append({"codes": acceptable, "qty": qty})
+        if skip or not clauses:
+            continue
+        sentence = f"{cust_spoken}要" + "，".join(clauses)
+        cases.append({
+            "suite": "recent",
+            "order": order["name"],
+            "dictionary_customer_id": order["customer"],
+            "expected_customer_id": order["customer"],
+            "spoken_name": cust_spoken,
+            "wine_name": "+".join(e["codes"][0] for e in expected),
+            "expected_item_code": expected[0]["codes"][0],
+            "expected_items": expected,
+            "quantity": expected[0]["qty"],
+            "sentence": sentence,
+        })
+    return cases
+
+
+def random_test_cases(count=100, seed=None):
+    """Random full orders: dictionary customer spoken name x curated item
+    alias x random quantity — closer to how orders are actually dictated
+    than the systematic suites."""
+    import random
+    rng = random.Random(seed)
+    customers = dictionary_rows()
+    aliases = item_alias_rows()
+    qty_words = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五", 6: "六",
+                 7: "七", 8: "八", 9: "九", 10: "十", 12: "十二",
+                 20: "二十", 24: "二十四"}
+    # General sentence shapes people actually dictate. {c}=customer,
+    # {q}=quantity word, {i}=item. 要 is optional; quantity and item may
+    # come in either order.
+    PATTERNS = [
+        "{c}要{q}瓶{i}",      # 漾叶要三瓶日晷园
+        "{c}{q}瓶{i}",        # 漾叶三瓶日晷园
+        "{c}要{i}{q}瓶",      # 漾叶要日晷园三瓶
+        "{c}{i}{q}瓶",        # 漾叶日晷园三瓶
+        "给{c}来{q}瓶{i}",    # 给漾叶来三瓶日晷园
+        "{c}，{i}，{q}瓶",    # paused dictation
+    ]
+    cases = []
+    for _ in range(count):
+        dictionary_id, spoken = rng.choice(customers)
+        alias_spoken, item_code = rng.choice(aliases)
+        qty, qty_spoken = rng.choice(list(qty_words.items()))
+        pattern = rng.choice(PATTERNS)
+        sentence = pattern.format(c=spoken, q=qty_spoken, i=alias_spoken)
+        cases.append({
+            "suite": "random",
+            "pattern": pattern,
+            "dictionary_customer_id": dictionary_id,
+            "expected_customer_id": expected_customer_id(spoken),
+            "spoken_name": spoken,
+            "wine_name": alias_spoken,
+            "expected_item_code": item_code,
+            "quantity": qty,
+            "sentence": sentence,
+        })
+    return cases
+
+
+def item_test_cases(limit=None):
+    """One full-order sentence per unique spoken item name.
+
+    The anchor customer is fixed, so a failure isolates the item name.
+    Several vintages can share a spoken name; any of them is correct.
+    """
+    anchor_spoken, anchor_id = ITEM_SUITE_CUSTOMER
+    cases = []
+    for index, (spoken, codes) in enumerate(sorted(item_spoken_names().items())):
+        qty, qty_spoken = QUANTITIES[index % len(QUANTITIES)]
+        sentence = f"{anchor_spoken}要{qty_spoken}瓶{spoken}"
+        cases.append({
+            "suite": "items",
+            "dictionary_customer_id": anchor_id,
+            "expected_customer_id": anchor_id,
+            "spoken_name": spoken,
+            "wine_name": spoken,
+            "expected_item_code": codes[0],
+            "expected_item_codes": codes,
+            "quantity": qty,
+            "sentence": sentence,
+        })
+    return cases[:limit] if limit else cases
+
+
+async def synthesize_one(case, semaphore):
+    path = audio_path(case["sentence"])
     if os.path.exists(path) and os.path.getsize(path) > 100:
         return
     async with semaphore:
-        await edge_tts.Communicate(name, VOICE).save(path)
+        await edge_tts.Communicate(case["sentence"], VOICE).save(path)
 
 
-async def synthesize_all(names, concurrency):
+async def synthesize_all(cases, concurrency):
     os.makedirs(AUDIO_DIR, exist_ok=True)
     semaphore = asyncio.Semaphore(concurrency)
-    tasks = [synthesize_one(name, semaphore) for name in names]
+    tasks = [synthesize_one(case, semaphore) for case in cases]
     for index, task in enumerate(asyncio.as_completed(tasks), 1):
         await task
         if index % 25 == 0 or index == len(tasks):
             print(f"TTS {index}/{len(tasks)}", flush=True)
 
 
-def transcribe_all(names, hotwords, label, previous=None):
+def evaluate(cases, previous=None):
     results = dict(previous or {})
-    model = server._whisper_model()
-    for index, name in enumerate(names, 1):
-        if name in results:
+    hotwords = server._hotwords()
+    with server._cache_lock:
+        customers = list(server._cache["customers"])
+        items = list(server._cache["items"])
+    for index, case in enumerate(cases, 1):
+        key = hashlib.sha256(case["sentence"].encode()).hexdigest()[:20]
+        if key in results:
             continue
-        segments, _ = model.transcribe(
-            audio_path(name), language="zh", beam_size=1, vad_filter=True,
-            hotwords=hotwords,
-            initial_prompt="葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。")
-        heard = "".join(segment.text for segment in segments).strip()
-        results[name] = {
-            "heard": heard,
-            "ok": normalized(heard) == normalized(name),
+        recognition = server._recognize_order_audio(
+            audio_path(case["sentence"]), hotwords=hotwords)
+        parsed = server._fast_parse(recognition["text"], customers, items)
+        actual_customer = ((parsed or {}).get("customer") or {}).get("name")
+        parsed_items = (parsed or {}).get("items") or []
+        if case.get("expected_items"):
+            # multi-item order: every expected clause must be present
+            item_match = all(any(
+                row["item_code"] in exp["codes"] and row["qty"] == exp["qty"]
+                for row in parsed_items) for exp in case["expected_items"])
+        else:
+            acceptable = case.get("expected_item_codes") or \
+                [case["expected_item_code"]]
+            item_match = any(
+                row["item_code"] in acceptable
+                and row["qty"] == case["quantity"] for row in parsed_items)
+        customer_match = actual_customer == case["expected_customer_id"]
+        results[key] = {
+            **case,
+            "heard": recognition["text"],
+            "actual_customer_id": actual_customer,
+            "actual_items": [{"item_code": row["item_code"],
+                              "qty": row["qty"]} for row in parsed_items],
+            "customer_match": customer_match,
+            "item_match": item_match,
+            "matched": customer_match and item_match,
+            "uncertain": recognition["customer_uncertain"],
+            "passes": recognition["passes"],
         }
-        if index % 25 == 0 or index == len(names):
-            print(f"{label} {index}/{len(names)}", flush=True)
+        if index % 10 == 0 or index == len(cases):
+            save_results(results)
+            print(f"ASR {index}/{len(cases)}", flush=True)
     return results
 
 
-def save_results(payload):
+def save_results(results):
     os.makedirs(OUT_DIR, exist_ok=True)
-    with open(RESULTS_FILE, "w") as f:
+    failures = [row for row in results.values() if not row["matched"]]
+    payload = {
+        "voice": VOICE,
+        "total": len(results),
+        "matched": len(results) - len(failures),
+        "failure_count": len(failures),
+        "failures": failures,
+        "results": results,
+    }
+    with open(ACTIVE_RESULTS_FILE, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+    # Keep partial runs useful: the next resumable invocation immediately
+    # focuses Whisper on names that have failed so far. The focus file is
+    # customer-only vocabulary — item failures are not written there.
+    with open(FOCUS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(dict.fromkeys(
+            row["spoken_name"] for row in failures
+            if row.get("suite", "customers") != "items")),
+                  f, ensure_ascii=False, indent=2)
+
+
+def load_previous():
+    try:
+        with open(ACTIVE_RESULTS_FILE, encoding="utf-8") as f:
+            return json.load(f).get("results", {})
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def harvest_aliases():
+    """Learn aliases from eval failures into learned_aliases.json.
+
+    For each failed case, map what Whisper actually HEARD (customer phrase or
+    item name) to the expected target. Unsafe entries are skipped:
+    - the heard phrase is itself another customer's/item's spoken name
+      (aliasing it would hijack the real name, e.g. homophone 三年间/叁年间)
+    - generic terms, or phrases shorter than 2 characters
+    - item cases where the right item was found but the qty was wrong
+      (not a naming problem)
+    """
+    previous = load_previous()
+    failures = [row for row in previous.values() if not row["matched"]]
+    with server._cache_lock:
+        customers = list(server._cache["customers"])
+        items = list(server._cache["items"])
+    # spoken names of OTHER targets — never alias these
+    cust_voice = {}   # norm/pinyin -> set of customer ids
+    for c in customers:
+        for name, py in zip(c.get("_voice_names", []),
+                            c.get("_voice_pys", [])):
+            cust_voice.setdefault(server._norm(name), set()).add(c["name"])
+            cust_voice.setdefault(py, set()).add(c["name"])
+    item_voice = {}
+    for it in items:
+        for spoken in server._item_spoken_names(it):
+            item_voice.setdefault(server._norm(spoken), set()).add(
+                it.get("item_code"))
+            item_voice.setdefault(server._py_full(spoken), set()).add(
+                it.get("item_code"))
+
+    learned = server._load_learned()
+    learned.setdefault("items", {})
+    learned.setdefault("customers", {})
+    added, skipped = [], []
+    # phrase -> possible targets; one mishearing can map to several customers
+    # (葡萄 for each 葡道 branch) — resolve by the newest-order rule below
+    cust_proposals = {}
+    item_proposals = {}
+    for row in failures:
+        heard = row.get("heard") or ""
+        if not heard:
+            continue
+        # customer phrase
+        if not row["customer_match"] and row.get("expected_customer_id"):
+            phrase = server._customer_voice_phrase(heard)
+            target = row["expected_customer_id"]
+            if phrase and phrase != row.get("spoken_name"):
+                if len(phrase) < 2:
+                    skipped.append((phrase, target, "too short"))
+                else:
+                    cust_proposals.setdefault(phrase, set()).add(target)
+        # item phrase (only when the right item was not heard at all)
+        elif row["customer_match"] and not row["item_match"]:
+            acceptable = set(row.get("expected_item_codes")
+                             or [row["expected_item_code"]])
+            found = {r["item_code"] for r in row.get("actual_items", [])}
+            if found & acceptable:
+                skipped.append((row["spoken_name"], sorted(acceptable),
+                                "qty problem, not naming"))
+                continue
+            segments = server._seg_list(heard)
+            cust_phrase = server._customer_voice_phrase(heard)
+            parts = [server._split_qty(s)[0] for s in segments
+                     if not s.startswith(cust_phrase[:2])]
+            parts = [p for p in parts if p]
+            if len(parts) != 1:
+                skipped.append((row["spoken_name"], sorted(acceptable),
+                                f"cannot isolate item phrase in {heard!r}"))
+                continue
+            phrase = parts[0]
+            # aim the alias at the newest vintage (user rule: always newest)
+            target = max(acceptable, key=lambda code: server._vintage(
+                {"item_code": code}))
+            if phrase == row["spoken_name"] or len(phrase) < 2:
+                skipped.append((phrase, target, "name heard correctly"))
+                continue
+            item_proposals.setdefault(phrase, set()).add(target)
+    # Resolve proposals into aliases. User rules:
+    # - a phrase shared by several customers -> the one with the newest order
+    # - a phrase shared by several vintages  -> the newest vintage
+    # - a phrase that IS another target's spoken name -> never alias it
+    recent_rank = server._customer_recent_order_rank()
+    for phrase, targets in cust_proposals.items():
+        target = min(targets, key=lambda c: recent_rank.get(c, float("inf")))
+        keys = {server._norm(phrase), server._py_full(phrase)}
+        owners = set().union(*(cust_voice.get(k, set()) for k in keys))
+        if owners - {target}:
+            skipped.append((phrase, target,
+                            f"collides with {sorted(owners - {target})}"))
+            continue
+        for k in keys:
+            learned["customers"][k] = {"phrase": phrase, "customer": target}
+        added.append((phrase, target))
+    for phrase, targets in item_proposals.items():
+        target = max(targets,
+                     key=lambda code: server._vintage({"item_code": code}))
+        keys = {server._norm(phrase), server._py_full(phrase)}
+        owners = set().union(*(item_voice.get(k, set()) for k in keys))
+        if owners - {target}:
+            skipped.append((phrase, target,
+                            f"collides with {sorted(owners - {target})}"))
+            continue
+        for k in keys:
+            learned["items"][k] = {"phrase": phrase, "item_code": target}
+        added.append((phrase, target))
+    with open(server._LEARN_FILE, "w", encoding="utf-8") as f:
+        json.dump(learned, f, ensure_ascii=False, indent=1)
+    print(f"Learned {len(added)} aliases -> {server._LEARN_FILE}")
+    for phrase, target in added:
+        print(f"  + {phrase!r} -> {target}")
+    print(f"Skipped {len(skipped)} (unsafe):")
+    for phrase, target, why in skipped:
+        print(f"  - {phrase!r} -> {target}: {why}")
 
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--suite", choices=["customers", "items", "random",
+                                            "recent", "all"],
+                        default="all")
+    parser.add_argument("--random-count", type=int, default=100)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--orders-file", default="/tmp/last20_orders.json")
     parser.add_argument("--tts-concurrency", type=int, default=8)
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--tts-only", action="store_true")
+    parser.add_argument("--harvest", action="store_true",
+                        help="learn aliases from the last run's failures "
+                             "into learned_aliases.json, then exit")
     args = parser.parse_args()
-    names = customer_names()
-    print(f"Testing {len(names)} unique spoken customer names", flush=True)
-    asyncio.run(synthesize_all(names, args.tts_concurrency))
-
-    base_hotwords = server._hotwords()
-    baseline = transcribe_all(names, base_hotwords, "baseline")
-    failures = [name for name in names if not baseline[name]["ok"]]
-    with open(FOCUS_FILE, "w") as f:
-        json.dump(failures, f, ensure_ascii=False, indent=2)
-    print(f"Baseline failures: {len(failures)}/{len(names)}", flush=True)
-
-    focused_hotwords = server._hotwords()
-    focused = transcribe_all(names, focused_hotwords, "focused")
-    focused_failures = [name for name in names if not focused[name]["ok"]]
-    save_results({
-        "voice": VOICE,
-        "total": len(names),
-        "baseline_failure_count": len(failures),
-        "focused_failure_count": len(focused_failures),
-        "baseline": baseline,
-        "focused": focused,
-        "focused_failures": focused_failures,
-    })
-    print(f"Focused failures: {len(focused_failures)}/{len(names)}", flush=True)
-    print(f"Results: {RESULTS_FILE}", flush=True)
+    if args.harvest:
+        harvest_aliases()
+        return
+    global ACTIVE_RESULTS_FILE
+    if args.suite == "random":
+        ACTIVE_RESULTS_FILE = RANDOM_RESULTS_FILE
+    elif args.suite == "recent":
+        ACTIVE_RESULTS_FILE = RECENT_RESULTS_FILE
+    cases = []
+    if args.suite in ("customers", "all"):
+        cases += test_cases(args.limit)
+    if args.suite in ("items", "all"):
+        cases += item_test_cases(args.limit)
+    if args.suite == "random":
+        cases += random_test_cases(args.random_count, args.seed)
+    if args.suite == "recent":
+        cases += recent_test_cases(args.orders_file)
+    print(f"Testing {len(cases)} full spoken orders", flush=True)
+    asyncio.run(synthesize_all(cases, args.tts_concurrency))
+    if args.tts_only:
+        return
+    results = evaluate(cases, {} if args.fresh else load_previous())
+    failures = [row for row in results.values() if not row["matched"]]
+    save_results(results)
+    print(f"Matched: {len(results) - len(failures)}/{len(results)}", flush=True)
+    print(f"Results: {ACTIVE_RESULTS_FILE}", flush=True)
 
 
 if __name__ == "__main__":
