@@ -28,3 +28,5 @@ certs/
 # live deployment (symlinked from /srv/www/lucia)
 site/
 voice_log.jsonl
+voice_customer_eval/
+customer_voice_focus.json

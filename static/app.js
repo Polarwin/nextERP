@@ -648,6 +648,9 @@ function renderNewOrder() {
           <span class="customer">${esc(no.customer_name || "")}</span>
           <button class="link-btn" onclick="clearCustomer()">更换</button>
         </div>
+        ${no.customer_uncertain
+          ? `<div class="meta" id="customer-warning" style="color:#d97706;margin-top:8px">⚠️ 客户识别不确定，请核对</div>`
+          : ""}
       </div>
       ${no.candidates && !no.customer ? `
       <div id="cust-candidates">
@@ -748,7 +751,11 @@ function noStepQty(i, d) {
   noSetQty(i, v);
 }
 function noSetQty(i, v) { no.items[i].qty = Math.max(0, parseFloat(v) || 0); renderNoItems(); }
-function noSetRate(i, v) { no.items[i].rate = Math.max(0, parseFloat(v) || 0); renderNoItems(); }
+function noSetRate(i, v) {
+  no.items[i].rate = Math.max(0, parseFloat(v) || 0);
+  no.items[i].is_free = no.items[i].rate === 0;
+  renderNoItems();
+}
 function noRemove(i) { no.items.splice(i, 1); renderNoItems(); }
 
 function undoVoice() {
@@ -781,6 +788,7 @@ function undoVoice() {
 
 function clearCustomer() {
   no.customer = null; no.customer_name = null;
+  no.customer_uncertain = false;
   no.candidates = null;
   document.getElementById("cust-picked").classList.add("hidden");
   document.getElementById("cust-search").classList.remove("hidden");
@@ -790,8 +798,10 @@ function pickCandidate(i) {
   const c = no.candidates[i];
   no.customer = c.name;
   no.customer_name = c.customer_name;
+  no.customer_uncertain = false;
   no.candidates = null;
   renderNewOrder();
+  repriceItemsForCustomer(c.name);
   // learn the choice: next time this phrase auto-selects, no picker
   const phrase = no.voice && no.voice.parsed && no.voice.parsed.customer_phrase;
   if (phrase) {
@@ -849,9 +859,36 @@ function renderCustomerHits(rows) {
 
 function pickCustomer(name, display) {
   no.customer = name; no.customer_name = display;
+  no.customer_uncertain = false;
+  const warning = document.getElementById("customer-warning");
+  if (warning) warning.remove();
   document.getElementById("cust-picked").classList.remove("hidden");
   document.getElementById("cust-picked").querySelector(".customer").textContent = display;
   document.getElementById("cust-search").classList.add("hidden");
+  repriceItemsForCustomer(name);
+}
+
+async function repriceItemsForCustomer(customer) {
+  if (!no || !customer || !no.items.length) return;
+  // A zero-rate duplicate is an intentional promotional/free row. Reprice
+  // paid rows only, using the newly selected customer's price list.
+  const paidRows = no.items.filter(it => !it.is_free);
+  if (!paidRows.length) return;
+  const rates = new Map();
+  try {
+    await Promise.all([...new Set(paidRows.map(it => it.item_code))].map(async code => {
+      const info = await api(`/api/item_price?item_code=${encodeURIComponent(code)}`
+        + `&customer=${encodeURIComponent(customer)}`);
+      rates.set(code, Number(info.rate) || 0);
+    }));
+    // Ignore stale responses if the user selected another customer meanwhile.
+    if (!no || no.customer !== customer) return;
+    paidRows.forEach(it => { it.rate = rates.get(it.item_code) || 0; });
+    renderNoItems();
+    toast("已按新客户价格表更新商品单价");
+  } catch (e) {
+    toast("客户已更换，但部分商品价格更新失败：" + e.message, 5000);
+  }
 }
 
 function renderItemHits(rows) {
@@ -874,7 +911,7 @@ async function pickItem(code) {
     // change the free quantity without affecting the paid row.
     no.items.push({ item_code: existing.item_code,
                     item_name: existing.item_name,
-                    uom: existing.uom, qty: 1, rate: 0 });
+                    uom: existing.uom, qty: 1, rate: 0, is_free: true });
     document.getElementById("item-q").value = "";
     document.getElementById("item-results").innerHTML = "";
     renderNoItems();
@@ -1138,6 +1175,7 @@ function applyParsedOrder(d, text) {
   if (!no) return;
   no.voice = { text, parsed: d };  // kept for auto-learning on submit
   no.candidates = null;
+  no.customer_uncertain = Boolean(d.customer_uncertain);
   // track exactly what this parse applied, so 🔁重讲 can undo it cleanly
   const applied = { items: [], customer_set: false, prev_customer: no.customer,
                     prev_customer_name: no.customer_name,

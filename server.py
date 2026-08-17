@@ -10,6 +10,7 @@ Credentials are read from .env and stay server-side; the phone only ever
 talks to this Flask app.
 """
 import datetime
+import difflib
 import json
 import os
 import re
@@ -1374,6 +1375,16 @@ def _parse_transcript(text):
 _whisper = {"model": None, "lock": threading.Lock()}
 
 
+_CUSTOMER_CATEGORY_RE = re.compile(
+    r"^(?:OLC1W|DC1M|DC1W|DCIM|RIC|EIC|VIP|OL|OT|D|E|S)\s*",
+    re.IGNORECASE)
+
+
+def _spoken_customer_name(name):
+    """Customer name as people say it, without internal ERP categories."""
+    return _CUSTOMER_CATEGORY_RE.sub("", str(name or "")).strip()
+
+
 def _hotwords():
     """Domain vocabulary for whisper: distinctive item short-names (winery
     prefixes stripped, vineyard 园 names extracted), item codes, customer
@@ -1404,12 +1415,12 @@ def _hotwords():
                 names.append(short + "GG")       # 天梯园GG / 森林园GG
     names += ["天梯园", "日晷园", "香料园", "森林园", "修士园", "修道院", "修道园",
               "灵犀园", "灵犀园晚摘", "金滴园", "云岭干红", "云岭", "涅墨园",
-              "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG",
+              "甜心犬", "美鸭鸭", "森林之约", "凯瑟琳", "GG", "熊进",
               "herman干白", "赫曼干白",
               "德邦", "顺丰", "冰袋", "隔热膜", "运费",
               "雷司令", "丹魄", "莫斯卡托", "阿尔巴利诺", "瓶", "箱"]
-    cust_names = [c["customer_name"] for c in customers
-                  if c.get("customer_name")]
+    cust_names = [_spoken_customer_name(c["customer_name"])
+                  for c in customers if c.get("customer_name")]
     # branch customers (葡道-陆家嘴店 etc.) are said without the dash —
     # guarantee those spoken forms a hotword slot
     for c in cust_names:
@@ -1420,12 +1431,25 @@ def _hotwords():
     with _cache_lock:
         recent = list(_cache["recent_orders"])
     freq = Counter(o.get("customer") for o in recent if o.get("customer"))
-    hot_custs = [c for c, _ in freq.most_common(30)]
+    customer_names = {c.get("name"): _spoken_customer_name(
+        c.get("customer_name") or c.get("name")) for c in customers}
+    hot_custs = [customer_names.get(c, _spoken_customer_name(c))
+                 for c, _ in freq.most_common(30)]
     # whisper only keeps the END of a long prompt (~few hundred chars), so
     # order by importance: codes & cold customers first (may be dropped),
     # item short names, and hot customers + spoken short forms last
     names = list(dict.fromkeys(names))           # dedupe, keep order
-    return "，".join(codes + cust_names + names + hot_custs)[-1600:]
+    cust_names = list(dict.fromkeys(x for x in cust_names if x))
+    hot_custs = list(dict.fromkeys(x for x in hot_custs if x))
+    try:
+        with open("customer_voice_focus.json") as f:
+            focus_names = json.load(f)
+    except (OSError, ValueError, TypeError):
+        focus_names = []
+    focus_names = [_spoken_customer_name(x) for x in focus_names if x]
+    # Focus names go last because Whisper retains the end of a long prompt.
+    return "，".join(codes + cust_names + names + hot_custs
+                    + focus_names)[-1600:]
 
 
 def _whisper_model():
@@ -1436,6 +1460,55 @@ def _whisper_model():
                 _whisper["model"] = WhisperModel(
                     "small", device="cpu", compute_type="int8")
     return _whisper["model"]
+
+
+def _customer_voice_candidates(text, limit=5):
+    """Closest spoken customer names for a focused second ASR pass."""
+    segments = _seg_list(text)
+    phrase = segments[0] if segments else text
+    phrase_n = _norm(phrase)
+    phrase_py = _py_full(phrase)
+    with _cache_lock:
+        customers = list(_cache["customers"])
+    scores = {}
+    for customer in customers:
+        spoken = _spoken_customer_name(
+            customer.get("customer_name") or customer.get("name"))
+        spoken_n = _norm(spoken)
+        spoken_py = _py_full(spoken)
+        score = max(
+            difflib.SequenceMatcher(None, phrase_n, spoken_n).ratio(),
+            difflib.SequenceMatcher(None, phrase_py, spoken_py).ratio())
+        scores[spoken] = max(score, scores.get(spoken, 0.0))
+    ranked = [(score, spoken) for spoken, score in scores.items()]
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    names = [name for _, name in ranked[:limit]]
+    top_score = ranked[0][0] if ranked else 0.0
+    margin = top_score - (ranked[1][0] if len(ranked) > 1 else 0.0)
+    return names, top_score, margin
+
+
+def _customer_rows_for_spoken_names(names):
+    """Resolve ranked spoken names back to customer picker rows."""
+    with _cache_lock:
+        customers = list(_cache["customers"])
+    rows = []
+    for spoken in names:
+        for customer in customers:
+            customer_spoken = _spoken_customer_name(
+                customer.get("customer_name") or customer.get("name"))
+            if customer_spoken == spoken and all(
+                    row["name"] != customer["name"] for row in rows):
+                rows.append({"name": customer["name"],
+                             "customer_name": customer["customer_name"]})
+    return rows
+
+
+def _transcribe_audio(path, initial_prompt):
+    segments, _ = _whisper_model().transcribe(
+        path, language="zh", beam_size=1, vad_filter=True,
+        hotwords=_hotwords(), initial_prompt=initial_prompt)
+    return "".join(segment.text for segment in segments).strip()
 
 
 threading.Thread(target=_whisper_model, daemon=True).start()
@@ -1476,11 +1549,23 @@ def parse_audio():
     try:
         import time
         t0 = time.time()
-        segments, _ = _whisper_model().transcribe(
-            tmp.name, language="zh", beam_size=1, vad_filter=True,
-            hotwords=_hotwords(),
-            initial_prompt="葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。")
-        text = "".join(s.text for s in segments).strip()
+        base_prompt = "葡萄酒销售订单，包含客户名称、商品名称和数量（瓶/箱）。"
+        text = _transcribe_audio(tmp.name, base_prompt)
+        # If the customer was not heard exactly, use the dictionary to build a
+        # tiny candidate list and retry. A short immediate prompt influences
+        # Whisper much more reliably than the full 400+ customer hotword list.
+        candidates, first_score, _first_margin = \
+            _customer_voice_candidates(text)
+        first_phrase = _norm((_seg_list(text) or [text])[0])
+        exact = any(first_phrase == _norm(name) for name in candidates)
+        if text and candidates and not exact:
+            retry_prompt = (base_prompt + " 候选客户："
+                            + "、".join(candidates) + "。")
+            retry_text = _transcribe_audio(tmp.name, retry_prompt)
+            _retry_candidates, retry_score, _retry_margin = \
+                _customer_voice_candidates(retry_text)
+            if retry_text and retry_score > first_score:
+                text = retry_text
         t_asr = time.time()
         if not text:
             dest = _save_recording(tmp.name, suffix, "")
@@ -1489,6 +1574,19 @@ def parse_audio():
                    "error": "empty transcript"})
             return jsonify({"error": "没听清，请再试一次"}), 422
         result = _parse_transcript(text)
+        final_candidates, final_score, final_margin = \
+            _customer_voice_candidates(text)
+        final_phrase = _norm((_seg_list(text) or [text])[0])
+        final_exact = any(final_phrase == _norm(name)
+                          for name in final_candidates)
+        # Keep the best parsed customer selected, but flag weak/close evidence
+        # so the UI prominently asks the user to verify it.
+        if not final_exact and (final_score < 0.88 or final_margin < 0.12):
+            picker_rows = _customer_rows_for_spoken_names(
+                final_candidates[:5])
+            result["customer_uncertain"] = True
+            result["customer_suggestions"] = picker_rows
+            result["customer_phrase"] = (_seg_list(text) or [text])[0]
         result["text"] = text
         dest = _save_recording(tmp.name, suffix, text)
         _vlog({"ts": datetime.datetime.now().isoformat(timespec="seconds"),

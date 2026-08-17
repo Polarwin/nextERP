@@ -3,3 +3,4 @@ requests==2.34.2
 playwright==1.62.0
 pypinyin==0.55.0
 faster-whisper==1.2.1
+edge-tts==7.2.8
