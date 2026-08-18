@@ -113,8 +113,11 @@ def _item_aliases_by_code():
         codes = {row["item_code"] for row in server._cache["items"]}
     result = {}
     for phrase, target in aliases.items():
-        if target in codes:
-            result.setdefault(target, []).append(phrase)
+        latest = server._latest_vintage_item(target, [
+            row for row in server._cache["items"]])
+        resolved = (latest or {}).get("item_code")
+        if resolved in codes:
+            result.setdefault(resolved, []).append(phrase)
     return result
 
 

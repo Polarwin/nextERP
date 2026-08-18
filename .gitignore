@@ -30,6 +30,7 @@ site/
 voice_log.jsonl
 voice_customer_eval/
 voice_map_experiment/
+voice_recent_random_test/
 customer_voice_focus.json
 customer_spoken_names.txt
 
