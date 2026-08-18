@@ -157,11 +157,39 @@ def _cache_file(kind):
     return os.path.join(CACHE_DIR, f"{kind}.json")
 
 
+_PY_CACHE = {}
+_PYL_CACHE = {}
+
+
 def _py_full(s):
-    """Lowercase no-tone pinyin of s, spaces stripped (ASCII passes through)."""
-    from pypinyin import pinyin, Style
-    return "".join(p[0] for p in pinyin(
-        str(s or ""), style=Style.NORMAL)).replace(" ", "").lower()
+    """Lowercase no-tone pinyin of s, spaces stripped (ASCII passes through).
+    Cached: the voice parser asks for the same catalog names repeatedly."""
+    key = str(s or "")
+    if key not in _PY_CACHE:
+        from pypinyin import pinyin, Style
+        _PY_CACHE[key] = "".join(p[0] for p in pinyin(
+            key, style=Style.NORMAL)).replace(" ", "").lower()
+    return _PY_CACHE[key]
+
+
+def _py_syllables(s):
+    """s as a tuple of no-tone pinyin syllables (cached). Only letter tokens
+    are kept — punctuation/digits would break syllable-contiguity checks.
+    Nasal -ng finals are normalized away (jing~jin, chang~chan): the most
+    common Chinese ASR confusion, and not distinctive between customers."""
+    key = str(s or "")
+    if key not in _PYL_CACHE:
+        from pypinyin import pinyin, Style
+        tokens = []
+        for p in pinyin(key, style=Style.NORMAL):
+            t = p[0].strip().lower()
+            if not t.isalpha():
+                continue
+            if t.endswith("ng") and len(t) > 2:
+                t = t[:-1]
+            tokens.append(t)
+        _PYL_CACHE[key] = tuple(tokens)
+    return _PYL_CACHE[key]
 
 
 def _py_initials(s):
@@ -1315,6 +1343,50 @@ def _lcs_len(a, b):
     return best
 
 
+# Business-suffix words carry no matching signal (every other customer is a
+# 酒庄/酒业/商贸), yet they dominate pinyin substring/LCS scores and cause
+# silent misroutes: 分多酒庄 -> D黑皮诺酒庄 via shared "jiuzhuang", or a bare
+# 葡萄酒 segment substring-matching 醺葡醄酒业 ("putaojiu" in its pinyin).
+# Strip them from both sides so scoring hinges on the distinctive part.
+# Order matters: business suffixes first, 葡萄酒 last (薰葡萄酒业 must lose
+# 酒业 first, then 葡萄酒), and repeat until stable for adjacent combos.
+_GENERIC_MATCH_WORDS = ("有限公司", "文化传播", "酒业", "商贸", "贸易",
+                        "酒庄", "餐饮", "管理", "食品", "文化", "葡萄酒")
+
+
+def _strip_generic(s):
+    while True:
+        stripped = s
+        for word in _GENERIC_MATCH_WORDS:
+            stripped = stripped.replace(word, "")
+        if stripped == s:
+            return s
+        s = stripped
+
+
+def _lcs_syl_chars(a, b):
+    """Longest common contiguous run over syllable tuples ->
+    (count, chars, start_in_a). Alignment is syllable-level so pinyin
+    matches cannot cross syllable boundaries ("ngdian" inside wukangdian
+    ≈ 名典 mingdian); scoring uses the character length of the matched
+    syllables to stay on the old scale."""
+    best = (0, 0, 0)
+    prev_c = [0] * (len(b) + 1)
+    prev_h = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        cur_c = [0] * (len(b) + 1)
+        cur_h = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                cur_c[j] = prev_c[j - 1] + 1
+                cur_h[j] = prev_h[j - 1] + len(a[i - 1])
+                cand = (cur_c[j], cur_h[j], i - cur_c[j])
+                if cand[:2] > best[:2]:
+                    best = cand
+        prev_c, prev_h = cur_c, cur_h
+    return best
+
+
 def _relevance(seg_n, seg_py, row, name_field):
     """Quick relevance of a transcript segment to a catalog row.
     Substring matches score highest; longest-common-substring on hanzi and
@@ -1324,6 +1396,16 @@ def _relevance(seg_n, seg_py, row, name_field):
     ini = row.get("_ini", "")
     if not seg_n:
         return 0.0
+    seg_d, name_d = _strip_generic(seg_n), _strip_generic(name_n)
+    if (seg_d, name_d) != (seg_n, name_n):
+        # rescore on the distinctive parts; a side that is ALL generic
+        # words carries no signal at all
+        if not seg_d or not name_d:
+            return 0.0
+        seg_n, name_n = seg_d, name_d
+        seg_py = _py_full(seg_d)
+        py = _py_full(name_d)
+        ini = ""  # initials of the full name no longer match the stripped seg
     score = 0.0
     if seg_n in name_n:
         score = len(seg_n) * 2.0
@@ -1332,10 +1414,28 @@ def _relevance(seg_n, seg_py, row, name_field):
     if seg_py:
         if seg_py in py:
             score = max(score, len(seg_py) * 1.5)
-        elif len(seg_py) >= 2 and seg_py in ini:
+        elif ini and len(seg_py) >= 2 and seg_py in ini:
             score = max(score, len(seg_py))
         else:
-            score = max(score, _lcs_len(seg_py, py) * 0.9)
+            if name_field == "item_name":
+                # items match an isolated name part — char-level LCS absorbs
+                # ASR drift (幻影干魂葡道酒 ≈ 幻影干红葡萄酒)
+                score = max(score, _lcs_len(seg_py, py) * 0.9)
+            else:
+                # customers: syllable-level LCS (no cross-boundary fake
+                # matches), scored by matched character length. The segment
+                # carries verb+item noise, so a real match must cover most
+                # of the voice name's syllables — a miss falls back to the
+                # LLM instead of silently picking the wrong customer.
+                # Exception: orders start with the customer, so a match
+                # anchored at the very start of the segment (雄敬≈熊进) is
+                # accepted on its own strength.
+                seg_syl = _py_syllables(seg_n)
+                name_syl = _py_syllables(name_n)
+                count, chars, start = _lcs_syl_chars(seg_syl, name_syl)
+                if name_syl and (count / len(name_syl) >= 0.6
+                                 or start == 0):
+                    score = max(score, chars * 0.9)
     return score
 
 

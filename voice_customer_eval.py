@@ -19,6 +19,7 @@ AUDIO_DIR = os.path.join(OUT_DIR, "order_audio")
 RESULTS_FILE = os.path.join(OUT_DIR, "order_results.json")
 RANDOM_RESULTS_FILE = os.path.join(OUT_DIR, "random_results.json")
 RECENT_RESULTS_FILE = os.path.join(OUT_DIR, "recent_results.json")
+RANDOM500_RESULTS_FILE = os.path.join(OUT_DIR, "random500_results.json")
 FOCUS_FILE = "customer_voice_focus.json"
 # Random suite writes here so concurrent suite runs never clobber each other.
 ACTIVE_RESULTS_FILE = RESULTS_FILE
@@ -35,6 +36,21 @@ WINES = [
 # Fixed anchor customer for item-suite sentences: reliably recognized
 # (curated alias + hotword), so failures isolate the item name.
 ITEM_SUITE_CUSTOMER = ("熊进", "VIP熊进")
+
+QTY_WORDS = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五", 6: "六",
+             7: "七", 8: "八", 9: "九", 10: "十", 12: "十二",
+             20: "二十", 24: "二十四"}
+# General sentence shapes people actually dictate. {c}=customer,
+# {q}=quantity word, {i}=item. 要 is optional; quantity and item may
+# come in either order.
+PATTERNS = [
+    "{c}要{q}瓶{i}",      # 漾叶要三瓶日晷园
+    "{c}{q}瓶{i}",        # 漾叶三瓶日晷园
+    "{c}要{i}{q}瓶",      # 漾叶要日晷园三瓶
+    "{c}{i}{q}瓶",        # 漾叶日晷园三瓶
+    "给{c}来{q}瓶{i}",    # 给漾叶来三瓶日晷园
+    "{c}，{i}，{q}瓶",    # paused dictation
+]
 
 
 def audio_path(sentence):
@@ -183,25 +199,11 @@ def random_test_cases(count=100, seed=None):
     rng = random.Random(seed)
     customers = dictionary_rows()
     aliases = item_alias_rows()
-    qty_words = {1: "一", 2: "两", 3: "三", 4: "四", 5: "五", 6: "六",
-                 7: "七", 8: "八", 9: "九", 10: "十", 12: "十二",
-                 20: "二十", 24: "二十四"}
-    # General sentence shapes people actually dictate. {c}=customer,
-    # {q}=quantity word, {i}=item. 要 is optional; quantity and item may
-    # come in either order.
-    PATTERNS = [
-        "{c}要{q}瓶{i}",      # 漾叶要三瓶日晷园
-        "{c}{q}瓶{i}",        # 漾叶三瓶日晷园
-        "{c}要{i}{q}瓶",      # 漾叶要日晷园三瓶
-        "{c}{i}{q}瓶",        # 漾叶日晷园三瓶
-        "给{c}来{q}瓶{i}",    # 给漾叶来三瓶日晷园
-        "{c}，{i}，{q}瓶",    # paused dictation
-    ]
     cases = []
     for _ in range(count):
         dictionary_id, spoken = rng.choice(customers)
         alias_spoken, item_code = rng.choice(aliases)
-        qty, qty_spoken = rng.choice(list(qty_words.items()))
+        qty, qty_spoken = rng.choice(list(QTY_WORDS.items()))
         pattern = rng.choice(PATTERNS)
         sentence = pattern.format(c=spoken, q=qty_spoken, i=alias_spoken)
         cases.append({
@@ -218,7 +220,82 @@ def random_test_cases(count=100, seed=None):
     return cases
 
 
-def item_test_cases(limit=None):
+def random500_pool(orders_file="/tmp/last500_orders.json"):
+    """Customers and items of the last N real ERP orders, each reduced to
+    its shortest spoken name. Also reports pool members that have no spoken
+    name at all (dictionary gaps worth fixing by hand)."""
+    with open(orders_file, encoding="utf-8") as f:
+        orders = json.load(f)
+    with server._cache_lock:
+        customers = {c["name"]: c for c in server._cache["customers"]}
+        items = {it["item_code"]: it for it in server._cache["items"]}
+    alias_by_code = {}
+    for spoken, code in item_alias_rows():
+        alias_by_code.setdefault(code, []).append(spoken)
+
+    cust_pool, item_pool, gaps_c, gaps_i = [], [], [], []
+    for cid in dict.fromkeys(o["customer"] for o in orders):
+        cust = customers.get(cid)
+        names = [n for n in ((cust or {}).get("_voice_names") or []) if n]
+        if not names and cust and cust.get("_spoken"):
+            names = [cust["_spoken"]]
+        if names:
+            cust_pool.append((cid, _shortest(names)))
+        else:
+            gaps_c.append(cid)
+    for code in dict.fromkeys(it["item_code"] for o in orders
+                              for it in o["items"]):
+        it = items.get(code)
+        names = (server._item_spoken_names(it) +
+                 alias_by_code.get(code, [])) if it else []
+        if names:
+            item_pool.append((code, _shortest(names)))
+        else:
+            gaps_i.append(code)
+    print(f"Pool: {len(cust_pool)} customers, {len(item_pool)} items")
+    if gaps_c:
+        print(f"GAP customers without spoken name ({len(gaps_c)}): "
+              + ", ".join(gaps_c))
+    if gaps_i:
+        print(f"GAP items without spoken name ({len(gaps_i)}): "
+              + ", ".join(gaps_i))
+    return cust_pool, item_pool
+
+
+def random500_test_cases(count=100, seed=None,
+                         orders_file="/tmp/last500_orders.json"):
+    """Random orders over the last-500-orders vocabulary only, shortest
+    spoken names — the random suite, focused on what is actually sold."""
+    import random
+    rng = random.Random(seed)
+    cust_pool, item_pool = random500_pool(orders_file)
+    spoken_to_codes = item_spoken_names()
+    with server._cache_lock:
+        items = {it["item_code"]: it for it in server._cache["items"]}
+    cases = []
+    for _ in range(count):
+        cid, spoken = rng.choice(cust_pool)
+        code, item_spoken = rng.choice(item_pool)
+        qty, qty_spoken = rng.choice(list(QTY_WORDS.items()))
+        pattern = rng.choice(PATTERNS)
+        sentence = pattern.format(c=spoken, q=qty_spoken, i=item_spoken)
+        # Vintages sharing this spoken name resolve to the newest vintage.
+        shared = set(spoken_to_codes.get(item_spoken, [])) | {code}
+        newest = max(shared, key=lambda c: server._vintage(
+            items.get(c, {"item_code": c})))
+        cases.append({
+            "suite": "random500",
+            "pattern": pattern,
+            "dictionary_customer_id": cid,
+            "expected_customer_id": expected_customer_id(spoken),
+            "spoken_name": spoken,
+            "wine_name": item_spoken,
+            "expected_item_code": code,
+            "expected_item_codes": [newest],
+            "quantity": qty,
+            "sentence": sentence,
+        })
+    return cases
     """One full-order sentence per unique spoken item name.
 
     The anchor customer is fixed, so a failure isolates the item name.
@@ -461,11 +538,11 @@ def harvest_aliases():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite", choices=["customers", "items", "random",
-                                            "recent", "all"],
+                                            "recent", "random500", "all"],
                         default="all")
     parser.add_argument("--random-count", type=int, default=100)
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--orders-file", default="/tmp/last20_orders.json")
+    parser.add_argument("--orders-file")
     parser.add_argument("--tts-concurrency", type=int, default=8)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--fresh", action="store_true")
@@ -474,14 +551,20 @@ def main():
                         help="learn aliases from the last run's failures "
                              "into learned_aliases.json, then exit")
     args = parser.parse_args()
-    if args.harvest:
-        harvest_aliases()
-        return
     global ACTIVE_RESULTS_FILE
     if args.suite == "random":
         ACTIVE_RESULTS_FILE = RANDOM_RESULTS_FILE
     elif args.suite == "recent":
         ACTIVE_RESULTS_FILE = RECENT_RESULTS_FILE
+    elif args.suite == "random500":
+        ACTIVE_RESULTS_FILE = RANDOM500_RESULTS_FILE
+    if args.harvest:
+        harvest_aliases()
+        return
+    if args.orders_file is None:
+        args.orders_file = ("/tmp/last500_orders.json"
+                            if args.suite == "random500"
+                            else "/tmp/last20_orders.json")
     cases = []
     if args.suite in ("customers", "all"):
         cases += test_cases(args.limit)
@@ -491,6 +574,9 @@ def main():
         cases += random_test_cases(args.random_count, args.seed)
     if args.suite == "recent":
         cases += recent_test_cases(args.orders_file)
+    if args.suite == "random500":
+        cases += random500_test_cases(args.random_count, args.seed,
+                                      args.orders_file)
     print(f"Testing {len(cases)} full spoken orders", flush=True)
     asyncio.run(synthesize_all(cases, args.tts_concurrency))
     if args.tts_only:

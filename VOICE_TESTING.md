@@ -49,6 +49,7 @@ bin/python voice_customer_eval.py --suite customers   # every dictionary spoken 
 bin/python voice_customer_eval.py --suite items       # every catalogue spoken item name (158)
 bin/python voice_customer_eval.py --suite random --seed 2 --random-count 100
 bin/python voice_customer_eval.py --suite recent      # replay last 20 real ERP orders
+bin/python voice_customer_eval.py --suite random500 --seed 8 --random-count 100
 bin/python voice_customer_eval.py --suite all         # customers + items
 ```
 
@@ -60,13 +61,19 @@ bin/python voice_customer_eval.py --suite all         # customers + items
   commas). Closest to real dictation.
 - **recent**: replays the last 20 ERP orders with shortest spoken names and
   real quantities (regenerate `/tmp/last20_orders.json` first — see below).
+- **random500**: like random, but the customer/item pool is restricted to
+  the vocabulary of the **last 500 ERP orders** (shortest spoken names) —
+  focuses tuning on what is actually sold. Regenerate the pool first:
+  `bin/python fetch_last500_orders.py` (read-only; per-doc GETs, 8 workers).
+  Also prints pool members with no spoken name (dictionary gaps).
 
 Useful flags: `--fresh` (ignore previous results), `--limit N`,
-`--tts-only`, `--harvest`.
+`--tts-only`, `--harvest` (reads the suite's own results file — pass the
+same `--suite` you just ran).
 
 Each suite writes its own results file (`order_results.json`,
-`random_results.json`, `recent_results.json`) so concurrent runs never
-clobber each other.
+`random_results.json`, `recent_results.json`, `random500_results.json`) so
+concurrent runs never clobber each other.
 
 ## The improvement loop
 
@@ -91,6 +98,42 @@ clobber each other.
 6. **Real audio trumps TTS.** When `recordings/` + `voice_log.jsonl` show a
    real mishearing, add a dictionary entry or alias for it — TTS
    (XiaoxiaoNeural) is only a proxy for the user's voice.
+
+## random500 loop findings (2026-08-18)
+
+Iterating `random500` (100 fresh sentences per round, new seed each round so
+we never re-test on harvested data): 25 → 31 → 35 → 41, then a dip exposed
+two parser bugs, fixed in `server.py:_relevance`:
+
+- **Generic business words dominate fuzzy scores.** 酒庄/酒业/商贸/葡萄酒…
+  appear in hundreds of customer names, so a misheard item head like
+  分多酒庄 fuzzy-matched customer 黑皮诺酒庄 on the shared "jiuzhuang" —
+  a *silent wrong customer*, worse than a punt. Both sides are now stripped
+  of generic words (`_GENERIC_MATCH_WORDS`) before scoring; a side that is
+  all generic words scores 0.
+- **Char-level pinyin LCS crosses syllable boundaries.** "ngdian" inside
+  wukangdian fake-matched 名典 (mingdian). Pinyin LCS is now syllable-level
+  (`_py_syllables`, with nasal -ng finals normalized away — jing~jin, the
+  most common ASR confusion). A customer match must cover ≥60% of the voice
+  name's syllables OR anchor at the very start of the segment (orders start
+  with the customer); misses fall back to the LLM.
+
+Silent customer misroutes dropped from 4/100 to 0–1/100. Cost: ~10/891
+previously-lucky fuzzy hits (韩风贸易→冷风贸易, with one syllable plus the
+stripped generic word carrying the match) now punt to the LLM instead —
+the right trade, since punts are recoverable and misroutes are invisible.
+Post-fix rounds oscillate 30–42 (sampling noise at n=100 over a 120×76
+pool); ~half of the remaining failures are fast-parse punts that the
+production LLM resolves.
+
+Known leftovers (not fixed by harvest):
+
+- Whisper sometimes inserts a comma INSIDE an item name
+  （雅师谷酒庄，波雷拉） → the clause splits into a spurious extra item.
+- Learned aliases pin a vintage (为拉→IT015-22) while the newest-vintage
+  rule expects the family's newest code — vintage drift.
+- Bare 葡萄/葡道 is never aliased on purpose: the user always says a branch,
+  so `_normalize_transcript_text` + `_branch_customer_rescue` own it.
 
 ## Refreshing the recent-orders suite
 
