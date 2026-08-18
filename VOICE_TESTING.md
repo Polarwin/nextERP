@@ -33,16 +33,19 @@ The eval exercises ASR + fast parse. The LLM fallback is NOT tested here
 
 - Customers sharing a spoken name (homophones 叁年间/三年间) → the one with
   the **newest ERP order** (`_customer_recent_order_rank`).
-- Items sharing a spoken name across vintages → the **newest vintage**
-  (`_vintage`).
+- Items sharing a spoken name across vintages → a **spoken vintage wins**
+  （小海龙2025年 → the 2025 code, `_spoken_vintage`); when no vintage is
+  spoken, the **newest vintage** (`_vintage` / `_latest_vintage_item`).
 - Never alias a phrase that is itself another customer's/item's spoken name
   (the harvest skips these automatically).
 
 ## Test suites
 
-All in `voice_customer_eval.py`. Audio is synthesized once with edge-tts
-(`zh-CN-XiaoxiaoNeural`) and cached by sentence hash, so re-runs are
-ASR-only.
+All in `voice_customer_eval.py`. Audio is synthesized once with edge-tts and
+cached by sentence hash, so re-runs are ASR-only. Synthesis rotates through
+4 voices (`VOICES`: Xiaoxiao/Yunjian/Xiaoyi/Yunyang, deterministic per
+sentence) so harvested aliases are not specific to one synthetic voice;
+legacy single-voice cached audio stays valid.
 
 ```bash
 bin/python voice_customer_eval.py --suite customers   # every dictionary spoken name (734)
@@ -50,6 +53,7 @@ bin/python voice_customer_eval.py --suite items       # every catalogue spoken i
 bin/python voice_customer_eval.py --suite random --seed 2 --random-count 100
 bin/python voice_customer_eval.py --suite recent      # replay last 20 real ERP orders
 bin/python voice_customer_eval.py --suite random500 --seed 8 --random-count 100
+bin/python voice_customer_eval.py --suite real        # replay real user dictations
 bin/python voice_customer_eval.py --suite all         # customers + items
 ```
 
@@ -66,6 +70,15 @@ bin/python voice_customer_eval.py --suite all         # customers + items
   focuses tuning on what is actually sold. Regenerate the pool first:
   `bin/python fetch_last500_orders.py` (read-only; per-doc GETs, 8 workers).
   Also prints pool members with no spoken name (dictionary gaps).
+- **real**: replays every real user dictation in `voice_log.jsonl` +
+  `recordings/` through the CURRENT pipeline. The logged production result
+  is not trusted as truth (users correct mistakes before submitting), so
+  diffs between logged and current output are written to
+  `real_results.json` (`changed_for_review`) for manual review — new
+  dictionary entries / normalization rules come from these. All voice input
+  is always saved (`DEBUG_VOICE = True` in server.py), and corrections at
+  submit time feed `learned_aliases.json` via `/api/learn` — so every real
+  dictation automatically becomes training material.
 
 Useful flags: `--fresh` (ignore previous results), `--limit N`,
 `--tts-only`, `--harvest` (reads the suite's own results file — pass the
@@ -76,6 +89,14 @@ Each suite writes its own results file (`order_results.json`,
 concurrent runs never clobber each other.
 
 ## The improvement loop
+
+Methodology note: the vocabulary is a **closed set** (~120 active customers ×
+~76 active items), so overfitting is not a concern — learning every stable
+Whisper mishearing of a fixed vocabulary into the alias table is exactly the
+goal (it's a lookup table, not a model). The two real risks are (1) TTS
+mishearings ≠ the user's real voice — real recordings trump, see step 6 —
+and (2) hijacking inside the closed set: a misheard phrase that happens to
+BE another target's spoken name. The harvest collision rules guard that.
 
 1. **Run a suite.** Read the failures in the results file (`failures` key).
 2. **Classify before fixing anything:**

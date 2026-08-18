@@ -991,7 +991,7 @@ _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口�
 - 客户：从客户列表中选最匹配的一个。注意同音字（如"一杯"="壹杯")、简称（如"万杯")。带☆的是最近有ERP订单的客户，按订单新旧排在前；几个客户读音相同或相近时（如两个"漾叶")，必须选带☆的，多个带☆时选排最前的。
 - 商品：匹配货号或名称关键词。注意口语别名："jiji/JJ/吉吉"=GG雷司令。同音字也可能出现。
 - 数量：中文或阿拉伯数字，单位瓶/箱等，可能在品名前面或后面。一箱=12瓶。没说数量默认1瓶。
-- 年份：未指明年份时选最新年份（如同时有22和25，选25)。
+- 年份：口述中提到年份（如"2025年"、"二零二五年"）时，必须选对应年份的货号；未提到时选最新年份（如同时有22和25，选25)。
 - 物流方式（shipping_rule)：从口述中匹配物流词，可选值：{shipping}。如"德邦"="德邦快递"、"德邦加冰袋隔热膜"="德邦快递+冰袋隔热膜"、"加冰袋"对应带冰袋的选项。没提到为 null。
 - 运费（freight)：口述中"运费XX元"或单独的"XX元"，输出数字。没提到为 null。
 - 每个商品和客户都要回传口述中的原话片段（phrase / customer_phrase)，用于学习。
@@ -1175,7 +1175,7 @@ _SHIPPING_ALIASES = [
 ]
 
 _FREIGHT_RE = re.compile(
-    r"^(?:运费([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]{1,4})元?"
+    r"^(?:(?:运费|快递费?)([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]{1,4})元?"
     r"|([0-9]+(?:\.[0-9]+)?|[零一二两三四五六七八九十]{1,4})元)$")
 
 
@@ -1353,34 +1353,55 @@ def _vintage(row):
     return int(m.group(0)) if m else 0
 
 
-def _latest_vintage_item(item_code, items):
-    """Newest item in the same code family when vintage is unspoken.
+_YEAR_NUM_RE = re.compile(r"(20\d{2})\s*年?")
+_YEAR_CN_RE = re.compile(r"([零〇一二三四五六七八九]{4})\s*年")
+_YEAR_CN = {"零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+            "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
 
-    GH018-18H and GH018-23H are one product/format family; the trailing H is
-    retained because half-bottle and standard-bottle products are distinct.
-    """
+
+def _spoken_vintage(seg):
+    """Explicitly spoken vintage year (小海龙2025年 / 小海龙二零二五年)
+    -> 2025, else None. Rule: spoken vintage wins; unspoken -> newest."""
+    m = _YEAR_NUM_RE.search(seg)
+    if m:
+        return int(m.group(1))
+    m = _YEAR_CN_RE.search(seg)
+    if m:
+        digits = "".join(_YEAR_CN.get(ch, "") for ch in m.group(1))
+        if digits.startswith("20"):
+            return int(digits)
+    return None
+
+
+def _item_family(item_code, items):
+    """All cached rows in the same code family (GH018-18H/GH018-23H are one
+    product/format family; trailing H kept — half vs standard bottle)."""
     item_code = str(item_code or "")
     match = re.match(r"^(.*)-(\d{2})(H?)$", item_code, re.I)
     if not match:
-        exact = next((row for row in items
-                      if row.get("item_code") == item_code), None)
+        exact = [row for row in items if row.get("item_code") == item_code]
         if exact:
             return exact
-        # A voice alias may deliberately name only a family (ES022). Resolve
-        # ES022-24/ES022-25/... dynamically as new vintages enter the cache.
-        family_candidates = [row for row in items if re.match(
+        # A voice alias may deliberately name only a family (ES022).
+        return [row for row in items if re.match(
             rf"^{re.escape(item_code)}-\d{{2}}(?:H)?$",
             str(row.get("item_code") or ""), re.I)]
-        return max(family_candidates, key=_vintage) \
-            if family_candidates else None
     family = (match.group(1).lower(), match.group(3).lower())
-    candidates = []
-    for row in items:
-        candidate = re.match(
-            r"^(.*)-(\d{2})(H?)$", str(row.get("item_code") or ""), re.I)
-        if candidate and (candidate.group(1).lower(),
-                          candidate.group(3).lower()) == family:
-            candidates.append(row)
+    return [row for row in items
+            if (m2 := re.match(r"^(.*)-(\d{2})(H?)$",
+                               str(row.get("item_code") or ""), re.I))
+            and (m2.group(1).lower(), m2.group(3).lower()) == family]
+
+
+def _vintage_match_item(item_code, year, items):
+    """Family member with the explicitly spoken vintage, or None."""
+    return next((row for row in _item_family(item_code, items)
+                 if _vintage(row) == year), None)
+
+
+def _latest_vintage_item(item_code, items):
+    """Newest item in the same code family when vintage is unspoken."""
+    candidates = _item_family(item_code, items)
     return max(candidates, key=_vintage) if candidates else None
 
 
@@ -1553,12 +1574,24 @@ def _branch_customer_rescue(text, segments, customers):
             if not sep or not branch:
                 continue
             head_py, branch_py = _py_full(head), _py_full(branch)
-            if len(branch_py) < 4 or branch_py not in text_py:
+            if len(branch_py) < 4:
                 continue
-            score = max(
-                difflib.SequenceMatcher(None, phrase_py, head_py).ratio(),
-                difflib.SequenceMatcher(
-                    None, phrase_py[:len(head_py)], head_py).ratio())
+            # branch may be split around the head ("北京普道店"): accept the
+            # branch core + 店 anywhere in the transcript pinyin
+            hit = branch_py in text_py
+            if not hit and branch_py.endswith("dian"):
+                core = branch_py[:-4]
+                hit = len(core) >= 4 and core in text_py \
+                    and "dian" in text_py
+            if not hit:
+                continue
+            if head_py and head_py in phrase_py:
+                score = 1.0  # head heard correctly, just reordered
+            else:
+                score = max(
+                    difflib.SequenceMatcher(None, phrase_py, head_py).ratio(),
+                    difflib.SequenceMatcher(
+                        None, phrase_py[:len(head_py)], head_py).ratio())
             if score >= 0.6:
                 scored.append((score, c, branch, branch_py))
     if not scored:
@@ -1665,12 +1698,18 @@ def _fast_parse(text, customers, items):
     for idx, seg in enumerate(segments):
         if idx == cust_i:
             continue
+        # A spoken vintage (小海龙2025年) pins the vintage; strip it so it
+        # does not disturb alias/name matching.
+        spoken_year = _spoken_vintage(seg)
+        if spoken_year:
+            seg = _YEAR_NUM_RE.sub("", seg, count=1)
+            seg = _YEAR_CN_RE.sub("", seg, count=1)
         name_part, qty = _split_qty(seg)
         alias = _alias_for(name_part)
         if alias:
-            # Voice never includes vintage. A curated alias may have been
-            # created against an older code, so promote it within its product
-            # family before exact item-code matching.
+            # A curated alias may have been created against an older code,
+            # so promote it within its product family before exact
+            # item-code matching (to the spoken vintage, else the newest).
             latest_alias_item = _latest_vintage_item(alias, items)
             name_part = (latest_alias_item or {}).get("item_code", alias)
         if _norm(name_part) in _GENERIC_TERMS:
@@ -1688,6 +1727,12 @@ def _fast_parse(text, customers, items):
                 best, bs = it, s
         if not best or bs < 6:
             return None  # something we can't place -> LLM handles it
+        if spoken_year:
+            vintage_row = _vintage_match_item(best["item_code"],
+                                              spoken_year, items)
+            if not vintage_row:
+                return None  # spoken vintage not in the family -> LLM
+            best = vintage_row
         # bare vineyard name tying across different traits (天梯园 -> GG vs
         # 珍藏 vs 晚摘 vs 串选)? ambiguous -> LLM with a clarifying note
         tied = [it for it in items
@@ -1706,6 +1751,16 @@ def _fast_parse(text, customers, items):
                     "qty": qty, "phrase": name_part,
                     "rate": _price_for(best["item_code"], cust["name"])})
     if not out:
+        # customer-only utterance ("北京普道店") — no need for the slow LLM
+        # round-trip just to confirm the customer; ambiguous candidates
+        # still fall through.
+        if cust and cust_score >= 4 and not cust_candidates:
+            return {"customer": {"name": cust["name"],
+                                 "customer_name": cust["customer_name"]},
+                    "customer_phrase": segments[cust_i] if cust_i >= 0
+                    else _customer_voice_phrase(text),
+                    "items": [], "unmatched": [], "notes": None,
+                    "shipping_rule": shipping, "freight": freight}
         return None
     result = {"customer": None if cust_candidates else
               {"name": cust["name"], "customer_name": cust["customer_name"]},
@@ -1807,9 +1862,15 @@ def _parse_transcript(text):
         if not row:
             unmatched.append(code)
             continue
-        # Vintage is intentionally omitted from voice orders. Even if the
-        # LLM returns an older family code, use the newest cached vintage.
-        row = _latest_vintage_item(row["item_code"], all_items) or row
+        # Vintage: use the newest cached vintage UNLESS the dictation named
+        # one explicitly (小海龙2025年 -> the 2025 code, even if older).
+        spoken_year = _spoken_vintage(str(it.get("phrase") or "")) \
+            or _spoken_vintage(text)
+        if spoken_year:
+            row = _vintage_match_item(row["item_code"], spoken_year,
+                                      all_items) or row
+        else:
+            row = _latest_vintage_item(row["item_code"], all_items) or row
         qty = float(it.get("qty") or 1)
         existing = next((x for x in out_items
                          if x["item_code"] == row["item_code"]), None)

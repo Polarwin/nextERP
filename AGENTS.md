@@ -81,8 +81,10 @@ it works under the `/luciatrading/` prefix and standalone.
   - Several ERP customers may share one spoken name (e.g. homophones
     叁年间/三年间). Resolve to the customer with the **newest ERP order**
     (`_customer_recent_order_rank` in `server.py`).
-  - Items that share a spoken name across vintages resolve to the **newest
-    vintage** (`_vintage`).
+  - Items that share a spoken name across vintages: a **spoken vintage wins**
+    （小海龙2025年 → the 2025 code, `_spoken_vintage`); when no vintage is
+    spoken, resolve to the **newest vintage** (`_vintage` /
+    `_latest_vintage_item`).
   - `voice_customer_eval.py` synthesizes spoken orders with edge-tts and tests
     the production ASR pipeline; `--harvest` folds Whisper mishearings back
     into `learned_aliases.json`. Never alias a phrase that is itself another

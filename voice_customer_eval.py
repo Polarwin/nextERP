@@ -20,10 +20,18 @@ RESULTS_FILE = os.path.join(OUT_DIR, "order_results.json")
 RANDOM_RESULTS_FILE = os.path.join(OUT_DIR, "random_results.json")
 RECENT_RESULTS_FILE = os.path.join(OUT_DIR, "recent_results.json")
 RANDOM500_RESULTS_FILE = os.path.join(OUT_DIR, "random500_results.json")
+REAL_RESULTS_FILE = os.path.join(OUT_DIR, "real_results.json")
 FOCUS_FILE = "customer_voice_focus.json"
 # Random suite writes here so concurrent suite runs never clobber each other.
 ACTIVE_RESULTS_FILE = RESULTS_FILE
 VOICE = "zh-CN-XiaoxiaoNeural"
+# Synthetic orders are generated with a rotating set of TTS voices, not just
+# one — aliases harvested from a single synthetic voice risk being
+# voice-specific. Deterministic per sentence, so re-runs reuse cached audio.
+VOICES = ["zh-CN-XiaoxiaoNeural",   # female, warm
+          "zh-CN-YunjianNeural",    # male
+          "zh-CN-XiaoyiNeural",     # female
+          "zh-CN-YunyangNeural"]    # male, news style
 QUANTITIES = [(2, "两"), (3, "三"), (6, "六"), (12, "十二")]
 WINES = [
     ("日晷园", "GH006-24"),
@@ -53,8 +61,16 @@ PATTERNS = [
 ]
 
 
-def audio_path(sentence):
-    digest = hashlib.sha256(sentence.encode()).hexdigest()[:20]
+def case_voice(sentence):
+    """Deterministic voice rotation by sentence hash (stable across runs)."""
+    h = int(hashlib.sha256(sentence.encode()).hexdigest(), 16)
+    return VOICES[h % len(VOICES)]
+
+
+def audio_path(sentence, voice=VOICE):
+    # default voice keeps the legacy hash so existing cached audio stays valid
+    key = sentence if voice == VOICE else f"{voice}|{sentence}"
+    digest = hashlib.sha256(key.encode()).hexdigest()[:20]
     return os.path.join(AUDIO_DIR, f"{digest}.mp3")
 
 
@@ -278,11 +294,21 @@ def random500_test_cases(count=100, seed=None,
         code, item_spoken = rng.choice(item_pool)
         qty, qty_spoken = rng.choice(list(QTY_WORDS.items()))
         pattern = rng.choice(PATTERNS)
+        # 25% of dictations name the vintage explicitly (小海龙2025年):
+        # the spoken vintage then pins the exact code instead of newest.
+        expected_codes = None
+        if rng.random() < 0.25:
+            year = server._vintage(items.get(code, {"item_code": code}))
+            if year:
+                item_spoken = f"{item_spoken}{year}年"
+                expected_codes = [code]
         sentence = pattern.format(c=spoken, q=qty_spoken, i=item_spoken)
         # Vintages sharing this spoken name resolve to the newest vintage.
-        shared = set(spoken_to_codes.get(item_spoken, [])) | {code}
-        newest = max(shared, key=lambda c: server._vintage(
-            items.get(c, {"item_code": c})))
+        if expected_codes is None:
+            shared = set(spoken_to_codes.get(item_spoken, [])) | {code}
+            newest = max(shared, key=lambda c: server._vintage(
+                items.get(c, {"item_code": c})))
+            expected_codes = [newest]
         cases.append({
             "suite": "random500",
             "pattern": pattern,
@@ -291,11 +317,14 @@ def random500_test_cases(count=100, seed=None,
             "spoken_name": spoken,
             "wine_name": item_spoken,
             "expected_item_code": code,
-            "expected_item_codes": [newest],
+            "expected_item_codes": expected_codes,
             "quantity": qty,
             "sentence": sentence,
         })
     return cases
+
+
+def item_test_cases(limit=None):
     """One full-order sentence per unique spoken item name.
 
     The anchor customer is fixed, so a failure isolates the item name.
@@ -326,11 +355,12 @@ def random500_test_cases(count=100, seed=None,
 
 
 async def synthesize_one(case, semaphore):
-    path = audio_path(case["sentence"])
+    voice = case_voice(case["sentence"])
+    path = audio_path(case["sentence"], voice)
     if os.path.exists(path) and os.path.getsize(path) > 100:
         return
     async with semaphore:
-        await edge_tts.Communicate(case["sentence"], VOICE).save(path)
+        await edge_tts.Communicate(case["sentence"], voice).save(path)
 
 
 async def synthesize_all(cases, concurrency):
@@ -353,8 +383,9 @@ def evaluate(cases, previous=None):
         key = hashlib.sha256(case["sentence"].encode()).hexdigest()[:20]
         if key in results:
             continue
+        voice = case_voice(case["sentence"])
         recognition = server._recognize_order_audio(
-            audio_path(case["sentence"]), hotwords=hotwords)
+            audio_path(case["sentence"], voice), hotwords=hotwords)
         parsed = server._fast_parse(recognition["text"], customers, items)
         actual_customer = ((parsed or {}).get("customer") or {}).get("name")
         parsed_items = (parsed or {}).get("items") or []
@@ -372,6 +403,7 @@ def evaluate(cases, previous=None):
         customer_match = actual_customer == case["expected_customer_id"]
         results[key] = {
             **case,
+            "voice": voice,
             "heard": recognition["text"],
             "actual_customer_id": actual_customer,
             "actual_items": [{"item_code": row["item_code"],
@@ -385,6 +417,70 @@ def evaluate(cases, previous=None):
         if index % 10 == 0 or index == len(cases):
             save_results(results)
             print(f"ASR {index}/{len(cases)}", flush=True)
+    return results
+
+
+def real_cases(log_file="voice_log.jsonl"):
+    """Real user dictations from voice_log.jsonl + recordings/ — the ground
+    truth TTS only approximates. The logged production result is NOT trusted
+    as truth (the user may have corrected it afterwards); diffs between the
+    logged and the current pipeline output are flagged for manual review."""
+    cases = []
+    with open(log_file, encoding="utf-8") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("src") != "audio" or not row.get("text"):
+                continue
+            path = os.path.join("recordings", row.get("file") or "")
+            if os.path.exists(path):
+                cases.append({"suite": "real", "ts": row.get("ts"),
+                              "audio": path, "sentence": row["text"],
+                              "logged_path": row.get("path"),
+                              "logged_customer": row.get("customer"),
+                              "logged_items": row.get("items")})
+    return cases
+
+
+def evaluate_real(cases):
+    hotwords = server._hotwords()
+    with server._cache_lock:
+        customers = list(server._cache["customers"])
+        items = list(server._cache["items"])
+    results = {}
+    for index, case in enumerate(cases, 1):
+        recognition = server._recognize_order_audio(case["audio"],
+                                                    hotwords=hotwords)
+        parsed = server._fast_parse(recognition["text"], customers, items)
+        now_customer = ((parsed or {}).get("customer") or {}).get("name")
+        now_items = [[r["item_code"], float(r["qty"])]
+                     for r in (parsed or {}).get("items") or []]
+        logged_items = [[c, float(q)] for c, q in (case["logged_items"] or [])]
+        same = (now_customer == case["logged_customer"]
+                and sorted(map(str, now_items)) == sorted(map(str, logged_items)))
+        results[case["ts"]] = {
+            **case,
+            "heard_now": recognition["text"],
+            "now_customer_id": now_customer,
+            "now_items": now_items,
+            "now_path": "fast" if parsed else "llm",
+            "same_as_logged": same,
+        }
+        print(f"ASR {index}/{len(cases)}", flush=True)
+    changed = [r for r in results.values() if not r["same_as_logged"]]
+    payload = {"total": len(results), "same": len(results) - len(changed),
+               "changed_for_review": changed, "results": results}
+    with open(REAL_RESULTS_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"Same as logged: {len(results) - len(changed)}/{len(results)}; "
+          f"{len(changed)} changed — review {REAL_RESULTS_FILE}")
+    for r in changed:
+        print(f"  {r['ts']} said={r['sentence']!r}")
+        print(f"    logged: {r['logged_customer']} {r['logged_items']}")
+        print(f"    now:    {r['now_customer_id']} {r['now_items']} "
+              f"({r['now_path']}) heard={r['heard_now']!r}")
     return results
 
 
@@ -538,7 +634,8 @@ def harvest_aliases():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite", choices=["customers", "items", "random",
-                                            "recent", "random500", "all"],
+                                            "recent", "random500", "real",
+                                            "all"],
                         default="all")
     parser.add_argument("--random-count", type=int, default=100)
     parser.add_argument("--seed", type=int)
@@ -577,6 +674,11 @@ def main():
     if args.suite == "random500":
         cases += random500_test_cases(args.random_count, args.seed,
                                       args.orders_file)
+    if args.suite == "real":
+        cases = real_cases()
+        print(f"Replaying {len(cases)} real user dictations", flush=True)
+        evaluate_real(cases)
+        return
     print(f"Testing {len(cases)} full spoken orders", flush=True)
     asyncio.run(synthesize_all(cases, args.tts_concurrency))
     if args.tts_only:
