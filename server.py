@@ -1266,6 +1266,37 @@ def _vintage(row):
     return int(m.group(0)) if m else 0
 
 
+def _latest_vintage_item(item_code, items):
+    """Newest item in the same code family when vintage is unspoken.
+
+    GH018-18H and GH018-23H are one product/format family; the trailing H is
+    retained because half-bottle and standard-bottle products are distinct.
+    """
+    item_code = str(item_code or "")
+    match = re.match(r"^(.*)-(\d{2})(H?)$", item_code, re.I)
+    if not match:
+        exact = next((row for row in items
+                      if row.get("item_code") == item_code), None)
+        if exact:
+            return exact
+        # A voice alias may deliberately name only a family (ES022). Resolve
+        # ES022-24/ES022-25/... dynamically as new vintages enter the cache.
+        family_candidates = [row for row in items if re.match(
+            rf"^{re.escape(item_code)}-\d{{2}}(?:H)?$",
+            str(row.get("item_code") or ""), re.I)]
+        return max(family_candidates, key=_vintage) \
+            if family_candidates else None
+    family = (match.group(1).lower(), match.group(3).lower())
+    candidates = []
+    for row in items:
+        candidate = re.match(
+            r"^(.*)-(\d{2})(H?)$", str(row.get("item_code") or ""), re.I)
+        if candidate and (candidate.group(1).lower(),
+                          candidate.group(3).lower()) == family:
+            candidates.append(row)
+    return max(candidates, key=_vintage) if candidates else None
+
+
 def _lcs_len(a, b):
     """Length of the longest common substring of a and b."""
     if not a or not b:
@@ -1478,7 +1509,11 @@ def _fast_parse(text, customers, items):
         name_part, qty = _split_qty(seg)
         alias = _alias_for(name_part)
         if alias:
-            name_part = alias
+            # Voice never includes vintage. A curated alias may have been
+            # created against an older code, so promote it within its product
+            # family before exact item-code matching.
+            latest_alias_item = _latest_vintage_item(alias, items)
+            name_part = (latest_alias_item or {}).get("item_code", alias)
         if _norm(name_part) in _GENERIC_TERMS:
             return None  # too vague (just 雷司令 etc.) -> LLM decides
         sn, sp = _norm(name_part), _py_full(name_part)
@@ -1613,6 +1648,9 @@ def _parse_transcript(text):
         if not row:
             unmatched.append(code)
             continue
+        # Vintage is intentionally omitted from voice orders. Even if the
+        # LLM returns an older family code, use the newest cached vintage.
+        row = _latest_vintage_item(row["item_code"], all_items) or row
         qty = float(it.get("qty") or 1)
         existing = next((x for x in out_items
                          if x["item_code"] == row["item_code"]), None)
