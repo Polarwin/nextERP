@@ -378,7 +378,10 @@ function chSetDesc(src, i, v) { chRows(src)[i].description = v; }
 function chSetAmount(src, i, v) { chRows(src)[i].tax_amount = Math.max(0, parseFloat(v) || 0); }
 function chRemove(src, i) { chRows(src).splice(i, 1); chRerender(src); }
 function chAdd(src) {
+  // charge_type is mandatory on ERP tax rows — a row without it fails
+  // server-side with MandatoryError: charge_type. Actual = fixed amount.
   chRows(src).push({ account_head: orderMeta.charge_accounts[0],
+                     charge_type: "Actual",
                      description: "", tax_amount: 0 });
   chRerender(src);
 }

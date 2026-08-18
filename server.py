@@ -570,7 +570,11 @@ def submit_order(name):
     r = erp.call("PUT", f"/api/resource/Sales Order/{name}",
                  json={"docstatus": 1})
     body, code = erp_json(r)
-    return jsonify(body.get("data", body) if code == 200 else body), code
+    if code != 200:
+        _log_api_error(f"POST /api/orders/{name}/submit",
+                       {"docstatus": 1}, code, body)
+    return jsonify(body.get("data", body)
+                   if code == 200 else _friendly_error(body)), code
 
 
 @app.route("/api/customers")
@@ -709,6 +713,8 @@ def create_order():
     items = payload.get("items") or []
     if not payload.get("customer") or not items:
         return jsonify({"error": "需要客户和至少一个商品"}), 400
+    if any(not it.get("item_code") for it in items):
+        return jsonify({"error": "有商品缺少货号，请重新选择"}), 400
     today = datetime.date.today().isoformat()
     warehouse = payload.get("warehouse") or get_default_warehouse()
     doc = {
@@ -741,19 +747,62 @@ def create_order():
     r = erp.call("POST", "/api/resource/Sales Order", json=doc)
     body, code = erp_json(r)
     if code != 200:
-        return jsonify(body), code
+        _log_api_error("POST /api/orders", doc, code, body)
+        return jsonify(_friendly_error(body)), code
     created = body["data"]
     if payload.get("submit"):
         r2 = erp.call("PUT", f"/api/resource/Sales Order/{created['name']}",
                       json={"docstatus": 1})
         body2, code2 = erp_json(r2)
         if code2 != 200:
+            _log_api_error(f"POST /api/orders(submit) {created['name']}",
+                           {"docstatus": 1}, code2, body2)
             # order exists as draft — tell the user so it isn't lost
+            friendly = _friendly_error(body2).get("error")
             return jsonify({"error": f"订单已保存为草稿 {created['name']}，"
-                                     f"但提交失败：{body2.get('error')}",
+                                     f"但提交失败：{friendly}",
                             "name": created["name"]}), code2
         created = body2["data"]
     return jsonify(created)
+
+
+_FIELD_LABELS = {
+    "charge_type": "费用类型（费用/税费行）",
+    "account_head": "会计科目（费用/税费行）",
+    "customer": "客户",
+    "item_code": "商品货号",
+    "items": "商品行",
+    "delivery_date": "送货日期",
+    "transaction_date": "订单日期",
+    "selling_price_list": "价格表",
+    "set_warehouse": "仓库",
+}
+
+
+def _friendly_error(body):
+    """Translate ERP error gibberish into an actionable Chinese message.
+    MandatoryError: [Sales Order, X]: charge_type -> 缺少必填项：费用类型…"""
+    err = (body or {}).get("error") or ""
+    m = re.search(r"MandatoryError: \[[^]]+\]:\s*(.+)", err)
+    if m:
+        fields = [_FIELD_LABELS.get(f.strip(), f.strip())
+                  for f in m.group(1).split(",")]
+        return {"error": "缺少必填项：" + "、".join(fields)}
+    return body
+
+
+def _log_api_error(endpoint, payload, code, body):
+    """Append failed ERP writes to api_errors.jsonl so the next
+    '提交失败' is debuggable from the server side."""
+    try:
+        with open("api_errors.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "endpoint": endpoint, "payload": payload,
+                "code": code, "error": body.get("error") or str(body)[:500],
+            }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 @app.route("/api/orders/<path:name>", methods=["PUT"])
@@ -766,12 +815,22 @@ def update_order(name):
     if "shipping_rule" in payload:
         doc["shipping_rule"] = payload["shipping_rule"] or None
     if "taxes" in payload:
-        doc["taxes"] = payload["taxes"]
+        taxes = []
+        for row in payload["taxes"]:
+            # charge_type is mandatory on Sales Taxes and Charges rows; rows
+            # added in the app editor don't carry it. Actual = fixed amount.
+            row.setdefault("charge_type", "Actual")
+            if row.get("account_head"):
+                taxes.append(row)
+        doc["taxes"] = taxes
     if not doc:
         return jsonify({"error": "nothing to update"}), 400
     r = erp.call("PUT", f"/api/resource/Sales Order/{name}", json=doc)
     body, code = erp_json(r)
-    return jsonify(body.get("data", body) if code == 200 else body), code
+    if code != 200:
+        _log_api_error(f"PUT /api/orders/{name}", doc, code, body)
+    return jsonify(body.get("data", body)
+                   if code == 200 else _friendly_error(body)), code
 
 
 @app.route("/api/customer_delivery_meta")
@@ -2134,7 +2193,11 @@ def submit_delivery(name):
     r = erp.call("PUT", f"/api/resource/Delivery Note/{name}",
                  json={"docstatus": 1})
     body, code = erp_json(r)
-    return jsonify(body.get("data", body) if code == 200 else body), code
+    if code != 200:
+        _log_api_error(f"POST /api/deliveries/{name}/submit",
+                       {"docstatus": 1}, code, body)
+    return jsonify(body.get("data", body)
+                   if code == 200 else _friendly_error(body)), code
 
 
 @app.route("/api/pdf")
