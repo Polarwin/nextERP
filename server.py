@@ -730,6 +730,12 @@ def create_order():
             "item_code": it["item_code"],
             "qty": float(it.get("qty") or 1),
             "rate": float(it.get("rate") or 0),
+            # 赠品 rows: ERP treats a falsy rate as "missing" and silently
+            # refills it from the price list. price_list_rate 0 +
+            # is_free_item makes the zero price stick.
+            **({"price_list_rate": 0, "is_free_item": 1}
+               if (it.get("is_free") or not float(it.get("rate") or 0))
+               else {}),
             "warehouse": warehouse,
             "delivery_date": payload.get("delivery_date") or today,
         } for it in items],
@@ -1695,8 +1701,13 @@ def _fast_parse(text, customers, items):
                     "items": [], "unmatched": [], "notes": None,
                     "shipping_rule": shipping, "freight": freight}
     out = []
+    # users sometimes repeat the customer name ("饕餮屈勇，饕餮屈勇，…") —
+    # skip echoes of the customer segment so they are not parsed as items
+    cust_py = _py_full(segments[cust_i]) if cust_i >= 0 else None
     for idx, seg in enumerate(segments):
         if idx == cust_i:
+            continue
+        if cust_py and _py_full(seg) == cust_py:
             continue
         # A spoken vintage (小海龙2025年) pins the vintage; strip it so it
         # does not disturb alias/name matching.

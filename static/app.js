@@ -972,7 +972,8 @@ async function saveNewOrder(submit, printPdf = false) {
         warehouse: no.warehouse,
         shipping_rule: no.shipping_rule || undefined,
         charges: no.charges.filter(c => c.tax_amount > 0 || c.description),
-        items: items.map(it => ({ item_code: it.item_code, qty: it.qty, rate: it.rate })),
+        items: items.map(it => ({ item_code: it.item_code, qty: it.qty, rate: it.rate,
+                                  is_free: !!it.is_free })),
         submit,
       }),
     });
