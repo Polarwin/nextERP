@@ -13,7 +13,8 @@ it works under the `/luciatrading/` prefix and standalone.
 
 - **NEVER use port 8000** for anything in this project. The app listens on
   port **8347** (randomly chosen, fixed in `server.py`; `PORT` env overrides).
-  Any new service here must also avoid 8000.
+  Any new service here must also avoid 8000. Port **8349** is taken by
+  `llama-server.service` (local Qwen3-1.7B LLM, see below).
 - **Before touching nginx (or any shared system config), inspect what already
   exists.** This host runs several apps behind one nginx: one catch-all
   `default_server` block in `/etc/nginx/sites-available/homeserver` serves
@@ -57,6 +58,14 @@ it works under the `/luciatrading/` prefix and standalone.
   `werkzeug.security.generate_password_hash` and restart `server.py`.
 
 ## Architecture notes
+
+- Local LLM (system-wide, not project-scoped): `llama-server.service`
+  serves Qwen3-1.7B Q4_K_M via llama.cpp (Vulkan, MX350 GPU offload) as an
+  OpenAI-compatible API on `127.0.0.1:8349` (LAN: `https://192.168.0.9/llm/v1`).
+  Engine + model live in `/opt/llm/`; installer and docs live in the sibling
+  project `../LLMqwen17/`. Any local app may use it. Practice runs showed
+  ~3s/call with JSON-schema-constrained output; pinyin-annotated candidate
+  lists were essential for accuracy.
 
 - Branches: `main` = the mobile app; `www` = the company website (`site/`,
   EN/DE/FR/ES/IT). `site/` is gitignored on `main` — the live deployment is

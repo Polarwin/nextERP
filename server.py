@@ -898,14 +898,37 @@ def _price_for(item_code, customer):
 
 
 # ------------------------------------------------------- voice order parsing
-# LLM backends are local CLIs with subscription logins — no API keys needed:
-# kimi -p (Kimi Code CLI) is primary, codex exec (ChatGPT) is the fallback.
-# Same approach as the Recipes app.
+# LLM backends: "local" = Qwen3-1.7B via llama.cpp (llama-server.service on
+# 127.0.0.1:8349, installed by ../LLMqwen17/install.sh) — fast (~3s) and
+# offline. kimi/codex CLIs (subscription logins) remain as fallbacks.
 
-VOICE_LLM_BACKENDS = ["kimi", "codex"]
+VOICE_LLM_BACKENDS = ["local", "kimi", "codex"]
 
 _PARSE_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "voice-parse-schema.json")
+
+_LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:8349")
+
+
+def _local_llm_parse(full_prompt):
+    """Local Qwen3-1.7B via llama-server. Schema-constrained JSON with
+    thinking disabled — ~3s on the MX350 for a typical order prompt."""
+    with open(_PARSE_SCHEMA) as f:
+        schema = json.load(f)
+    r = requests.post(
+        _LOCAL_LLM_URL + "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": full_prompt
+                          + "\n\n只输出一个JSON对象，不要任何其他文字。 /no_think"}],
+            "temperature": 0,
+            "max_tokens": 600,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": {"type": "json_schema", "json_schema": {
+                "name": "order", "strict": True, "schema": schema}},
+        },
+        timeout=120)
+    r.raise_for_status()
+    return json.loads(r.json()["choices"][0]["message"]["content"])
 
 
 def _kimi_parse(full_prompt):
@@ -941,12 +964,14 @@ def _codex_parse(full_prompt):
 
 
 def _llm_parse(prompt, user_text):
+    """Returns (parsed_dict, backend_name)."""
     full_prompt = prompt + "\n\n口述订单:" + user_text
     errors = []
     for backend in VOICE_LLM_BACKENDS:
-        fn = {"kimi": _kimi_parse, "codex": _codex_parse}[backend]
+        fn = {"local": _local_llm_parse,
+              "kimi": _kimi_parse, "codex": _codex_parse}[backend]
         try:
-            return fn(full_prompt)
+            return fn(full_prompt), backend
         except Exception as e:  # noqa: BLE001 - try next backend
             errors.append(f"{backend}: {e}")
     raise RuntimeError("; ".join(errors))
@@ -973,7 +998,9 @@ def _save_learned(data):
 
 
 def _learned_hint():
-    """Render learned aliases as a prompt section (empty string if none)."""
+    """Render learned aliases as a prompt section (empty string if none).
+    Capped: the harvest collects hundreds of entries, which would blow the
+    local model's context — most recent entries are the most relevant."""
     data = _load_learned()
     lines = []
     for norm, a in data.get("items", {}).items():
@@ -982,15 +1009,16 @@ def _learned_hint():
         lines.append(f"「{a['phrase']}」= 客户 {a['customer']}")
     if not lines:
         return ""
+    lines = lines[-60:]
     return ("\n用户纠正习惯（最高优先级，必须遵循）:\n" + "\n".join(lines) + "\n")
 
 
 _PARSE_PROMPT = """你是葡萄酒销售订单的语音解析助手。用户口述一张订单，你要提取客户和商品明细。
 
-客户列表（名称|简称可能不完整，口述常有同音字）:
+客户列表（名称|拼音，口述常有同音字，先把听到的词转拼音再比对）:
 {customers}
 
-商品列表（货号|名称）:
+商品列表（货号|名称|口语名拼音）:
 {items}
 {learned}
 规则：
@@ -1841,20 +1869,32 @@ def _parse_transcript(text):
         key=lambda c: (c["name"] not in recent_rank,
                        recent_rank.get(c["name"], 0)))
     customer_list = "、".join(
-        c["customer_name"] + ("☆" if c["name"] in recent_rank else "")
+        # pinyin annotation is essential for the small local model to map
+        # homophone mishearings (陶铁区泳 ~ taotiequyong)
+        f"{c['customer_name']}|{(c.get('_voice_pys') or [''])[0]}"
+        + ("☆" if c["name"] in recent_rank else "")
         for c in ordered)
+
+    def _item_line(i):
+        # short hanzi name (Latin/number noise stripped, capped) + spoken
+        # pinyin — the local model's context is small, keep lines compact
+        hanzi = re.sub(r"[^一-鿿]", "", i.get("item_name", ""))[:24]
+        spoken = _item_spoken_names(i)
+        py = _py_full(spoken[0]) if spoken else ""
+        return f"{i['item_code']}|{hanzi}|{py}"
+
     prompt = _PARSE_PROMPT.format(
         customers=customer_list,
-        items="；".join(f"{i['item_code']}|{i.get('item_name', '')}"
-                        for i in items),
+        items="；".join(_item_line(i) for i in items),
         learned=_learned_hint(),
         shipping="、".join(ship_rules))
-    parsed = _llm_parse(prompt, text)
+    parsed, llm_backend = _llm_parse(prompt, text)
 
     # map LLM output back to real records (full catalog, not just prefiltered)
     customer = None
     if parsed.get("customer"):
         wanted = str(parsed["customer"]).replace("☆", "").strip()
+        wanted = wanted.split("|")[0].strip()  # model may echo the pinyin
         matches = [c for c in all_customers
                    if c["customer_name"] == wanted or c["name"] == wanted]
         if len(matches) > 1:
@@ -1917,7 +1957,7 @@ def _parse_transcript(text):
         "notes": parsed.get("notes"),
         "shipping_rule": ship,
         "freight": freight,
-        "_path": "llm",
+        "_path": f"llm/{llm_backend}",
     }
 
 
