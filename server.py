@@ -898,11 +898,15 @@ def _price_for(item_code, customer):
 
 
 # ------------------------------------------------------- voice order parsing
-# LLM backends: "local" = Qwen3-1.7B via llama.cpp (llama-server.service on
-# 127.0.0.1:8349, installed by ../LLMqwen17/install.sh) — fast (~3s) and
-# offline. kimi/codex CLIs (subscription logins) remain as fallbacks.
+# LLM backends: kimi/codex CLIs (subscription logins) are primary — on
+# badly misheard transcripts they clearly beat the local 1.7B. "local"
+# comes next: Qwen3-1.7B behind the llama-cli-wrapper.service gateway on
+# 127.0.0.1:8349 (installed by ../LLMqwen17/install.sh). The gateway starts
+# llama-server on the first request and kills it after 5 min idle, so the
+# model never sits in RAM/VRAM — we just POST and forget. "claude" (CLI)
+# is the final fallback.
 
-VOICE_LLM_BACKENDS = ["local", "kimi", "codex"]
+VOICE_LLM_BACKENDS = ["kimi", "codex", "local", "claude"]
 
 _PARSE_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "voice-parse-schema.json")
@@ -911,8 +915,8 @@ _LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:8349")
 
 
 def _local_llm_parse(full_prompt):
-    """Local Qwen3-1.7B via llama-server. Schema-constrained JSON with
-    thinking disabled — ~3s on the MX350 for a typical order prompt."""
+    """Local Qwen3-1.7B via the on-demand gateway (first call pays model
+    load, ~10s; warm calls ~3s). Schema-constrained JSON, thinking off."""
     with open(_PARSE_SCHEMA) as f:
         schema = json.load(f)
     r = requests.post(
@@ -926,9 +930,22 @@ def _local_llm_parse(full_prompt):
             "response_format": {"type": "json_schema", "json_schema": {
                 "name": "order", "strict": True, "schema": schema}},
         },
-        timeout=120)
+        timeout=180)  # first call includes llama-server startup + model load
     r.raise_for_status()
     return json.loads(r.json()["choices"][0]["message"]["content"])
+
+
+def _claude_parse(full_prompt):
+    import subprocess
+    r = subprocess.run(
+        ["claude", "-p", full_prompt
+         + "\n\n只输出一个JSON对象，不要任何其他文字、解释或标记。"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        capture_output=True, text=True, timeout=240, check=False)
+    m = re.search(r"\{.*\}", r.stdout, re.S)
+    if not m:
+        raise RuntimeError(f"claude 输出中无 JSON: {r.stdout[-200:]}")
+    return json.loads(m.group(0))
 
 
 def _kimi_parse(full_prompt):
@@ -968,8 +985,8 @@ def _llm_parse(prompt, user_text):
     full_prompt = prompt + "\n\n口述订单:" + user_text
     errors = []
     for backend in VOICE_LLM_BACKENDS:
-        fn = {"local": _local_llm_parse,
-              "kimi": _kimi_parse, "codex": _codex_parse}[backend]
+        fn = {"local": _local_llm_parse, "kimi": _kimi_parse,
+              "codex": _codex_parse, "claude": _claude_parse}[backend]
         try:
             return fn(full_prompt), backend
         except Exception as e:  # noqa: BLE001 - try next backend
@@ -1577,6 +1594,18 @@ def _prefilter_catalog(text, customers, items, n_cust=50, n_items=60):
             sa = max((_relevance(sn, sp, r, field)
                       for variants in scored for sn, sp in variants[1:]),
                      default=0.0)
+            if field == "customer_name":
+                # also score spoken/voice names — a badly misheard transcript
+                # may share nothing with the ERP customer_name while matching
+                # the spoken form by pinyin (微唇 ~ 威醇 voice name)
+                for v, vpy, vini in zip(r.get("_voice_names", []),
+                                        r.get("_voice_pys", []),
+                                        r.get("_voice_inis", [])):
+                    vrow = {"voice": v, "_py": vpy, "_ini": vini}
+                    s = max(s, max((_relevance(sn, sp, vrow, "voice")
+                                    for variants in scored
+                                    for sn, sp in variants[:1]),
+                                   default=0.0))
             out.append((s, sa, r))
         out.sort(key=lambda x: -(x[0] + x[1]))
         top = [r for s, sa, r in out[:n_items] if s > 0 or sa > 0]
@@ -1729,6 +1758,7 @@ def _fast_parse(text, customers, items):
                     "items": [], "unmatched": [], "notes": None,
                     "shipping_rule": shipping, "freight": freight}
     out = []
+    notes = []
     # users sometimes repeat the customer name ("饕餮屈勇，饕餮屈勇，…") —
     # skip echoes of the customer segment so they are not parsed as items
     cust_py = _py_full(segments[cust_i]) if cust_i >= 0 else None
@@ -1773,12 +1803,19 @@ def _fast_parse(text, customers, items):
                 return None  # spoken vintage not in the family -> LLM
             best = vintage_row
         # bare vineyard name tying across different traits (天梯园 -> GG vs
-        # 珍藏 vs 晚摘 vs 串选)? ambiguous -> LLM with a clarifying note
+        # 珍藏 vs 晚摘 vs 串选)? Rule: the customer must name the variant.
+        # Don't guess, don't burn an LLM call — drop the row and say so.
         tied = [it for it in items
                 if it is not best and bs > 0 and
                 abs(_relevance(sn, sp, it, "item_name") - bs) <= 0.01]
-        if len({_traits(it.get("item_name")) for it in [best, *tied]}) > 1:
-            return None
+        traits = {_traits(it.get("item_name")) for it in [best, *tied]}
+        if len(traits) > 1:
+            labels = "、".join(
+                "".join(t.upper() if t in ("gg", "tba") else t
+                        for t in sorted(tr))
+                for tr in sorted(traits, key=lambda t: sorted(t)))
+            notes.append(f"「{seg}」有多款（{labels}），请明说哪一款")
+            continue
         existing = next((x for x in out
                          if x["item_code"] == best["item_code"]), None)
         if existing:
@@ -1792,20 +1829,30 @@ def _fast_parse(text, customers, items):
     if not out:
         # customer-only utterance ("北京普道店") — no need for the slow LLM
         # round-trip just to confirm the customer; ambiguous candidates
-        # still fall through.
+        # still fall through. Ambiguous-item notes must survive though
+        # ("两瓶天梯园" alone: customer + the please-clarify note).
         if cust and cust_score >= 4 and not cust_candidates:
             return {"customer": {"name": cust["name"],
                                  "customer_name": cust["customer_name"]},
                     "customer_phrase": segments[cust_i] if cust_i >= 0
                     else _customer_voice_phrase(text),
-                    "items": [], "unmatched": [], "notes": None,
+                    "items": [], "unmatched": [],
+                    "notes": "；".join(notes) or None,
+                    "shipping_rule": shipping, "freight": freight}
+        if notes:
+            # only an ambiguous item was said — answer locally with the
+            # clarify note instead of an LLM round-trip
+            return {"customer": None, "customer_phrase": None,
+                    "items": [], "unmatched": [],
+                    "notes": "；".join(notes),
                     "shipping_rule": shipping, "freight": freight}
         return None
     result = {"customer": None if cust_candidates else
               {"name": cust["name"], "customer_name": cust["customer_name"]},
               "customer_phrase": segments[cust_i] if cust_i >= 0
               else _customer_voice_phrase(text),
-              "items": out, "unmatched": [], "notes": None,
+              "items": out, "unmatched": [],
+              "notes": "；".join(notes) or None,
               "shipping_rule": shipping, "freight": freight}
     if cust_candidates:
         result["customer_candidates"] = [

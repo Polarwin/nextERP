@@ -13,8 +13,8 @@ it works under the `/luciatrading/` prefix and standalone.
 
 - **NEVER use port 8000** for anything in this project. The app listens on
   port **8347** (randomly chosen, fixed in `server.py`; `PORT` env overrides).
-  Any new service here must also avoid 8000. Port **8349** is taken by
-  `llama-server.service` (local Qwen3-1.7B LLM, see below).
+  Any new service here must also avoid 8000. Port **8349** is used by the
+  local LLM server (spawned on demand, see below) — keep it free.
 - **Before touching nginx (or any shared system config), inspect what already
   exists.** This host runs several apps behind one nginx: one catch-all
   `default_server` block in `/etc/nginx/sites-available/homeserver` serves
@@ -59,13 +59,16 @@ it works under the `/luciatrading/` prefix and standalone.
 
 ## Architecture notes
 
-- Local LLM (system-wide, not project-scoped): `llama-server.service`
-  serves Qwen3-1.7B Q4_K_M via llama.cpp (Vulkan, MX350 GPU offload) as an
-  OpenAI-compatible API on `127.0.0.1:8349` (LAN: `https://192.168.0.9/llm/v1`).
-  Engine + model live in `/opt/llm/`; installer and docs live in the sibling
-  project `../LLMqwen17/`. Any local app may use it. Practice runs showed
-  ~3s/call with JSON-schema-constrained output; pinyin-annotated candidate
-  lists were essential for accuracy.
+- Local LLM (system-wide, not project-scoped): Qwen3-1.7B Q4_K_M via
+  llama.cpp (Vulkan, MX350 GPU offload). The always-on
+  `llama-server.service` was replaced 2026-09-04 by
+  `llama-cli-wrapper.service` (gateway from `../LLMqwen17/`, installed by
+  its `install.sh`): it listens on `127.0.0.1:8349` (LAN:
+  `https://192.168.0.9/llm/v1`), spawns llama-server on the first request
+  and kills it after 5 min idle, so the model never sits in RAM/VRAM.
+  Engine + model live in `/opt/llm/`. Any local app may use it. Practice
+  runs showed pinyin-annotated candidate lists were essential for 1.7B
+  accuracy.
 
 - Branches: `main` = the mobile app; `www` = the company website (`site/`,
   EN/DE/FR/ES/IT). `site/` is gitignored on `main` — the live deployment is
@@ -94,6 +97,16 @@ it works under the `/luciatrading/` prefix and standalone.
     （小海龙2025年 → the 2025 code, `_spoken_vintage`); when no vintage is
     spoken, resolve to the **newest vintage** (`_vintage` /
     `_latest_vintage_item`).
+  - A bare vineyard name shared by several traits （天梯园 = 6号/晚摘/串选/
+    珍藏/GG/金盖/TBA) is **ambiguous on purpose**: never guess — drop the row
+    and return a "请明说哪一款" note (the fast parser's tied-traits check;
+    do not add a bare-name alias for such items). Explicit variants
+    （天梯园GG, 天梯园6号） parse normally.
+  - LLM backend order: **kimi → codex → local → claude**
+    (`VOICE_LLM_BACKENDS`). The local Qwen3-1.7B (on-demand gateway on
+    port 8349) comes before claude — on badly
+    misheard transcripts kimi clearly beats it (real-suite test 2026-09-04:
+    local 1/8 vs kimi 8/10 with the voice-name-scored prefilter).
   - `voice_customer_eval.py` synthesizes spoken orders with edge-tts and tests
     the production ASR pipeline; `--harvest` folds Whisper mishearings back
     into `learned_aliases.json`. Never alias a phrase that is itself another
