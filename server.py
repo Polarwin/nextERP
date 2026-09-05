@@ -912,6 +912,10 @@ _PARSE_SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "voice-parse-schema.json")
 
 _LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://127.0.0.1:8349")
+# The gateway serves several models; pin ours explicitly — its default is
+# Qwen3.5-2B, but 1.7B is the one we benchmarked (and /no_think +
+# enable_thinking are Qwen3-template switches).
+_LOCAL_LLM_MODEL = os.environ.get("LOCAL_LLM_MODEL", "Qwen3-1.7B-Q4_K_M.gguf")
 
 
 def _local_llm_parse(full_prompt):
@@ -922,6 +926,7 @@ def _local_llm_parse(full_prompt):
     r = requests.post(
         _LOCAL_LLM_URL + "/v1/chat/completions",
         json={
+            "model": _LOCAL_LLM_MODEL,
             "messages": [{"role": "user", "content": full_prompt
                           + "\n\n只输出一个JSON对象，不要任何其他文字。 /no_think"}],
             "temperature": 0,
