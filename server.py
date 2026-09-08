@@ -1333,7 +1333,11 @@ def _seg_list(text):
                 segment = item_lead + segment[qty_matches[0].start():]
                 qty_matches = list(_QTY_START.finditer(segment))
         # the split below separates qty tokens and the glue step reattaches
-        # them, so both 三瓶日晷园 and 日晷园三瓶 keep the item name intact
+        # them, so both 三瓶日晷园 and 日晷园三瓶 keep the item name intact.
+        # Normally a qty does NOT split after a number char (二十三瓶 is one
+        # quantity) — except right after a vintage year, arabic or spelled
+        # out, 年 optional ("珍藏二零二三十瓶" = 2023 vintage + 12 bottles,
+        # two separate item rows).
         item_text = segment
         if index > 0:
             item_text = re.sub(r"^(?:下单|订购|购买|要|来买|来|买)", "",
@@ -1342,10 +1346,17 @@ def _seg_list(text):
             r"(?:和|及|再来|再要|再加|还有|然后|另外)\s*"
             r"(?=[0-9零一二两三四五六七八九十]{1,3}\s*"
             r"(?:瓶|箱|盒|个|支|件|听))", "", item_text)
-        expanded.extend(s.strip() for s in re.split(
-            r"(?<![0-9零一二两三四五六七八九十])"
-            r"(?=[0-9零一二两三四五六七八九十]{1,3}\s*"
-            r"(?:瓶|箱|盒|个|支|件|听))", item_text) if s.strip())
+        qty_tok = (r"[0-9零一二两三四五六七八九十]{1,3}\s*"
+                   r"(?:瓶|箱|盒|个|支|件|听)")
+        year4 = r"(?:19|20)\d{2}"
+        year_cn = r"[二一][零九][零一二三四五六七八九]{2}"
+        split_re = (r"(?<![0-9零一二两三四五六七八九十])(?=" + qty_tok + r")"
+                    r"|(?<=" + year4 + r")(?=" + qty_tok + r")"
+                    r"|(?<=" + year4 + r"年)(?=" + qty_tok + r")"
+                    r"|(?<=" + year_cn + r")(?=" + qty_tok + r")"
+                    r"|(?<=" + year_cn + r"年)(?=" + qty_tok + r")")
+        expanded.extend(s.strip() for s in re.split(split_re, item_text)
+                        if s.strip())
     raw = expanded
     # spoken orders often prepend 给 to the customer: 给漾叶 -> 漾叶
     raw = [s[1:] if s.startswith("给") and len(s) > 1 else s for s in raw]
@@ -1410,7 +1421,7 @@ def _vintage(row):
 
 
 _YEAR_NUM_RE = re.compile(r"(20\d{2})\s*年?")
-_YEAR_CN_RE = re.compile(r"([零〇一二三四五六七八九]{4})\s*年")
+_YEAR_CN_RE = re.compile(r"([零〇一二三四五六七八九]{4})\s*年?")
 _YEAR_CN = {"零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
             "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
 
@@ -1889,6 +1900,9 @@ def _normalize_transcript_text(text):
         # 葡道 branches are always said with the branch (葡道东湖路店);
         # Whisper hears 葡萄、东湖路店 — rejoin so branch matching works.
         (r"葡萄[、，,]?\s*(?=\S{1,8}店)", "葡道"),
+        # 泊雅庄园 (Casar De Burbia) misheard as 伯雅; 干白 heard as 甘白.
+        (r"伯雅", "泊雅"),
+        (r"甘白", "干白"),
     ]
     for pattern, replacement in replacements:
         text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
