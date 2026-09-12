@@ -420,6 +420,8 @@ except (OSError, ValueError):
     _auth_conf = {}
 
 app.secret_key = _auth_conf.get("secret_key", "dev-only-insecure")
+# default is 31 days; re-logging in monthly was annoying for family users
+app.permanent_session_lifetime = datetime.timedelta(days=365)
 
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
@@ -435,9 +437,7 @@ button{padding:14px;font-size:16px;font-weight:600;border:none;border-radius:12p
 background:#2563eb;color:#fff}
 .err{color:#dc2626;font-size:14px;text-align:center}
 </style></head><body>
-<form method="post"><h1>🔒 nextERP</h1>
-<input type="password" name="password" placeholder="密码" autofocus required>
-<button type="submit">登录</button>{err}</form></body></html>"""
+<div class="err">🔒 nextERP<br><br>请使用专属链接访问<br>（找管理员要链接）</div></body></html>"""
 
 
 def _is_public():
@@ -448,6 +448,17 @@ def _is_public():
 def public_auth_gate():
     if not _is_public():
         return None
+    # magic-link login: ?key=<token> grants a session without the password
+    # (token hash in app_config.json; rotate by replacing the hash).
+    key = request.args.get("key")
+    if key:
+        from werkzeug.security import check_password_hash
+        if check_password_hash(_auth_conf.get("token_hash", ""), key):
+            session["ok"] = True
+            session.permanent = True
+            # strip the key from the URL so it doesn't linger in history
+            return redirect(request.path)
+        return jsonify({"error": "bad key"}), 403
     if request.path == "/login" or session.get("ok"):
         return None
     if request.path.startswith("/api/"):
@@ -457,16 +468,8 @@ def public_auth_gate():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    err = ""
-    if request.method == "POST":
-        from werkzeug.security import check_password_hash
-        if check_password_hash(_auth_conf.get("password_hash", ""),
-                               request.form.get("password", "")):
-            session["ok"] = True
-            session.permanent = True
-            return redirect("/")
-        err = '<div class="err">密码错误</div>'
-    return LOGIN_PAGE.replace("{err}", err)
+    # password login disabled 2026-09-12: magic-link tokens only
+    return LOGIN_PAGE
 
 
 @app.route("/logout")

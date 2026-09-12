@@ -52,10 +52,16 @@ it works under the `/luciatrading/` prefix and standalone.
 - Credentials live in `.env` (`website`, `username`, `password`) and must
   stay server-side — never print them, never send them to the browser.
 - Public auth: requests whose Host is `luciatrading.duckdns.org` require a
-  password login (Flask session cookie, 31-day); LAN access stays open.
-  Password hash + session secret in `app_config.json` (gitignored, never
-  commit). To change the password: regenerate the hash with
-  `werkzeug.security.generate_password_hash` and restart `server.py`.
+  magic-link token: `?key=<token>` grants a session (Flask cookie,
+  **365-day**) and is then stripped from the URL. Password login was
+  DISABLED 2026-09-12 — `/login` is just a "ask the admin for a link"
+  notice. Send non-technical users the link; they bookmark it, done.
+  LAN access stays open.
+  Session secret + token hash in `app_config.json` (gitignored, never
+  commit; `password_hash` is a leftover, unused). To rotate the token:
+  regenerate `token_hash` with
+  `werkzeug.security.generate_password_hash(secrets.token_urlsafe(24))`
+  and restart `server.py`.
 
 ## Architecture notes
 

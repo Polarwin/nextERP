@@ -171,7 +171,7 @@ async function renderOrders() {
     view.innerHTML = newBtn + searchBox;
     const renderList = (list) => {
       document.getElementById("order-list").innerHTML = list.length ? list.map(o => `
-      <div class="card clickable" onclick="openOrder('${esc(o.name)}')">
+      <div class="card clickable" onclick="openOrder(${jsq(o.name)})">
         <div class="row">
           <span class="customer">${esc(o.customer_name)}</span>
           ${statusBadge(o.status, o.docstatus)}
@@ -229,10 +229,10 @@ async function renderAlerts() {
         </div>
         <span class="qty-static" style="color:${a.total_qty <= 0 ? "#dc2626" : "#d97706"}">${a.total_qty} 瓶</span>
         ${isDisarmed
-          ? `<button class="link-btn" onclick="rearm('${esc(a.item_code)}')">恢复</button>`
+          ? `<button class="link-btn" onclick="rearm(${jsq(a.item_code)})">恢复</button>`
           : `<div style="display:flex;flex-direction:column">
-               <button class="link-btn" onclick="disarm('${esc(a.item_code)}', 30)">30天</button>
-               <button class="link-btn" onclick="disarm('${esc(a.item_code)}', 0)">永久</button>
+               <button class="link-btn" onclick="disarm(${jsq(a.item_code)}, 30)">30天</button>
+               <button class="link-btn" onclick="disarm(${jsq(a.item_code)}, 0)">永久</button>
              </div>`}
       </div>`;
     view.innerHTML = `
@@ -300,7 +300,7 @@ async function renderOrderDetail(name) {
       <div class="section-title">费用 / 税费${draft ? "（可编辑）" : ""}</div>
       <div class="card" id="so-charges"></div>
       ${draft ? `<button class="btn secondary" id="save-so-charges">💾 保存修改</button>` : ""}
-      <button class="btn secondary" onclick="openPdf('Sales Order','${esc(o.name)}')">🖨 打印订单 PDF</button>
+      <button class="btn secondary" onclick="openPdf('Sales Order', ${jsq(o.name)})">🖨 打印订单 PDF</button>
       <button class="btn secondary" onclick='sharePdf("Sales Order", ${jsq(o.name)}, this, ${jsq(o.customer_name)})'>📤 分享订单 PDF（微信）</button>
       ${draft
         ? `<button class="btn danger" id="submit-so">✅ 提交订单</button>` : ""}
@@ -503,7 +503,7 @@ async function renderDeliveries() {
     const rows = await api("/api/deliveries");
     if (!rows.length) { view.innerHTML = '<div class="empty">没有出货单</div>'; return; }
     view.innerHTML = rows.map(d => `
-      <div class="card clickable" onclick="openDelivery('${esc(d.name)}')">
+      <div class="card clickable" onclick="openDelivery(${jsq(d.name)})">
         <div class="row">
           <span class="customer">${esc(d.customer_name)}</span>
           ${statusBadge(d.status, d.docstatus)}
@@ -551,10 +551,10 @@ async function renderDeliveryDetail(name) {
       ${draft ? `
         <button class="btn secondary" id="save-draft">💾 保存草稿</button>
         <button class="btn danger" id="submit-dn">✅ 提交出货（扣库存）</button>
-        <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
+        <button class="btn secondary" onclick="openPdf('Delivery Note', ${jsq(d.name)})">🖨 打印出货单 PDF</button>
         <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF 文件（微信）</button>
       ` : `
-        <button class="btn secondary" onclick="openPdf('Delivery Note','${esc(d.name)}')">🖨 打印出货单 PDF</button>
+        <button class="btn secondary" onclick="openPdf('Delivery Note', ${jsq(d.name)})">🖨 打印出货单 PDF</button>
         <button class="btn secondary" onclick='sharePdf("Delivery Note", ${jsq(d.name)}, this, ${jsq(d.customer_name)})'>📤 分享出货单 PDF 文件（微信）</button>
       `}
     `;
