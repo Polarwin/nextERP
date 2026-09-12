@@ -2,9 +2,10 @@
 
 Mobile-first web app for the user's ERPNext/Frappe instance （销售订单 Sales
 Order, 销售出货 Delivery Note, PDF printing). Runs as a systemd service
-(`nexterp.service`, installed by `install-systemd.sh` — also handles
-transitioning a manually-started instance off port 8347); for manual runs:
-`bin/python server.py`. Open `http://<LAN-IP>:8347` directly, or via nginx at
+(`nexterp.service`, installed by `install-systemd.sh`); the unit's
+`ExecStartPre` kills any squatter on port 8347 before binding, so a stale
+manual `bin/python server.py` can no longer wedge the service (happened
+twice). For manual runs: `bin/python server.py`. Open `http://<LAN-IP>:8347` directly, or via nginx at
 `http://192.168.0.9/luciatrading/` (config: `nginx-luciatrading.conf`, installed
 to `/etc/nginx/sites-available/luciatrading`). Frontend uses relative paths so
 it works under the `/luciatrading/` prefix and standalone.

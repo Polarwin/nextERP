@@ -1027,14 +1027,19 @@ def _learned_hint():
     Capped: the harvest collects hundreds of entries, which would blow the
     local model's context — most recent entries are the most relevant."""
     data = _load_learned()
+    # Cap EACH category separately: items were appended before customers, so
+    # a single lines[-60:] over the combined list kept only customer rows
+    # (632 of them) and the LLM never saw a single item alias (found
+    # 2026-09-12 when kimi picked GH001-25 despite the H雷司令->GH002 alias).
     lines = []
     for norm, a in data.get("items", {}).items():
         lines.append(f"「{a['phrase']}」= {a['item_code']}({a.get('item_name', '')[:20]})")
+    item_lines, lines = lines[-30:], []
     for norm, a in data.get("customers", {}).items():
         lines.append(f"「{a['phrase']}」= 客户 {a['customer']}")
+    lines = item_lines + lines[-30:]
     if not lines:
         return ""
-    lines = lines[-60:]
     return ("\n用户纠正习惯（最高优先级，必须遵循）:\n" + "\n".join(lines) + "\n")
 
 

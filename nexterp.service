@@ -11,6 +11,13 @@ WorkingDirectory=/home/justin/Projects/nextERP
 Environment=PORT=8347
 Environment=PYTHONUNBUFFERED=1
 Environment=PATH=/home/justin/.kimi-code/bin:/home/justin/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Self-cleaning start: anything already holding 8347 is by definition a
+# stale manual "bin/python server.py" (this happened 2026-09-05 and
+# 2026-09-12 — the service then restart-looped on "Address already in
+# use"). Kill the squatter before binding. "-" prefix = ignore failure
+# (nothing holds the port). Runs as User=justin, so it can only kill our
+# own processes.
+ExecStartPre=-/bin/bash -c "ss -tlnpH 'sport = :8347' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | xargs -r kill; sleep 1"
 ExecStart=/home/justin/Projects/nextERP/bin/python /home/justin/Projects/nextERP/server.py
 Restart=on-failure
 RestartSec=5
