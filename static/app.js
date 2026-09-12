@@ -36,7 +36,13 @@ function esc(s) {
 
 // safe JS string literal inside a double-quoted HTML attribute
 function jsq(s) {
-  return JSON.stringify(String(s ?? "")).replace(/"/g, "&quot;");
+  // Escaped for BOTH html-attribute contexts ('...' and "...") and the JS
+  // string inside. 2026-09-12: an apostrophe in "OT Tyler's Brunch" broke
+  // out of a single-quoted onclick attribute and killed the share button.
+  return JSON.stringify(String(s ?? ""))
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function money(n) {
@@ -58,7 +64,15 @@ function statusBadge(status, docstatus) {
 }
 
 function openPdf(doctype, name) {
-  window.open(`api/pdf?doctype=${encodeURIComponent(doctype)}&name=${encodeURIComponent(name)}`, "_blank");
+  // window.open() is silently blocked by some mobile browsers, leaving the
+  // button looking dead; an anchor click with target=_blank gets through.
+  const a = document.createElement("a");
+  a.href = `api/pdf?doctype=${encodeURIComponent(doctype)}&name=${encodeURIComponent(name)}`;
+  a.target = "_blank";
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // Share the PDF as a real file (WeChat etc.) via the Web Share API;
