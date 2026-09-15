@@ -1185,7 +1185,7 @@ def parse_order():
         return jsonify({"error": f"解析超时或失败:{e}"}), 502
 
 
-_SPLIT_RE = re.compile(r"[，,。;；、.!！?？\s]+|还有|再加|然后|另外")
+_SPLIT_RE = re.compile(r"[，,。;；、.!！?？\s]+|还有|再加|然后|另外|作单")
 
 _CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
               "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
@@ -1299,12 +1299,12 @@ def _customer_voice_phrase(text):
     first = re.sub(r"^(?:给|帮|客户)\s*", "", first)
     # item-before-quantity orders (漾叶要日晷园三瓶 / 漾叶日晷园三瓶): the
     # customer is what precedes the verb, or a known voice-name prefix
-    verb = re.search(r"(?:下单|订购|购买|要|来买|来|买)", first)
+    verb = re.search(r"(?:下单|作单|订购|购买|要|来买|来|买)", first)
     if verb:
         first = first[:verb.start()]
     else:
         first = _customer_prefix(first) or first
-    first = re.sub(r"(?:下单|订购|购买|买|要|来)\s*$", "", first)
+    first = re.sub(r"(?:下单|作单|订购|购买|买|要|来)\s*$", "", first)
     return first.strip()
 
 
@@ -1337,7 +1337,7 @@ def _seg_list(text):
                 item_lead = head.split(customer, 1)[-1] \
                     if customer in head else ""
                 item_lead = re.sub(
-                    r"^(?:下单|订购|购买|要|来买|来|买)", "", item_lead).strip()
+                    r"^(?:下单|作单|订购|购买|要|来买|来|买)", "", item_lead).strip()
                 segment = item_lead + segment[qty_matches[0].start():]
                 qty_matches = list(_QTY_START.finditer(segment))
         # the split below separates qty tokens and the glue step reattaches
@@ -1348,7 +1348,7 @@ def _seg_list(text):
         # two separate item rows).
         item_text = segment
         if index > 0:
-            item_text = re.sub(r"^(?:下单|订购|购买|要|来买|来|买)", "",
+            item_text = re.sub(r"^(?:下单|作单|订购|购买|要|来买|来|买)", "",
                                item_text)
         item_text = re.sub(
             r"(?:和|及|再来|再要|再加|还有|然后|另外)\s*"
