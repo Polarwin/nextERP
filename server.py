@@ -97,6 +97,7 @@ CACHE_SPECS = {
         "params": {
             "fields": json.dumps(
                 ["name", "customer_name", "default_price_list"]),
+            "filters": json.dumps([["disabled", "=", 0]]),
             "limit_page_length": 5000,
         },
     },
