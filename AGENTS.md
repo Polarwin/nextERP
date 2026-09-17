@@ -66,6 +66,13 @@ it works under the `/luciatrading/` prefix and standalone.
 
 ## Architecture notes
 
+- ERP-side stock warning (2026-09-17): Client Script **"SO stock warning"**
+  on Sales Order (created via REST, owned by lucia@) pops an orange
+  advisory when a line's qty exceeds `Bin.actual_qty` at the delivery
+  warehouse — added after SAL-ORD-2026-00722 was voided (order@ picked
+  海角之吻 2023 at 0 stock; 2024 had 753). Advisory only; DN submit still
+  hard-blocks negative stock (`allow_negative_stock = 0`). Disable via
+  the Client Script list in ERP if it annoys anyone.
 - Local LLM (system-wide, not project-scoped): Qwen3-1.7B Q4_K_M via
   llama.cpp (Vulkan, MX350 GPU offload). The always-on
   `llama-server.service` was replaced 2026-09-04 by
